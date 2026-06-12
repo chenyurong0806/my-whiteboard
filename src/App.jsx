@@ -7,12 +7,6 @@ const SUPABASE_URL = "https://mamubvgmcetepllznifl.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_HEeNPSqD75cWlnmZjcVHKA_Pw-OdL_A";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// 🧮 辅助函数：计算当前画布上所有图形的版本特征和（极其高效，防止重复同步）
-const getElementsVersionSum = (elements) => {
-  if (!elements) return 0;
-  return elements.reduce((sum, el) => sum + el.version + (el.isDeleted ? 1 : 0), 0) + elements.length;
-};
-
 export default function App() {
   const [userInfo, setUserInfo] = useState({ name: "访客", isLoggedIn: false });
   const [privateBoards, setPrivateBoards] = useState([]);
@@ -20,20 +14,16 @@ export default function App() {
   const [currentBoard, setCurrentBoard] = useState(null); 
   const [onlineUsers, setOnlineUsers] = useState([]);
   const [excalidrawAPI, setExcalidrawAPI] = useState(null);
-  
-  // === 性能与核心同步锁 ===
+  const [isSaving, setIsSaving] = useState(false); // 保存状态锁
+
+  // === 性能与纯前端同步锁 ===
   const isReceiving = useRef(false);
-  const lastBroadcastTime = useRef(0);
-  const dbSaveTimer = useRef(null); 
   const isInitialLoading = useRef(false);
-  const lastLoadedId = useRef(null);
-  const channelRef = useRef(null); 
+  const lastBroadcastTime = useRef(0);
+  const lastVersionSum = useRef(0);
+  const channelRef = useRef(null);
 
-  // 🌟 新增核心防线
-  const hasUserInteracted = useRef(false); // 交互锁：用户是否真正点击/操作过画布
-  const lastVersionSum = useRef(0);        // 版本锁：记录上一次合法的画布版本和
-
-  // 1. 初始化用户信息与列表
+  // 1. 初始化用户信息与列表（只在页面首次打开时向后端发一次请求）
   useEffect(() => {
     const initApp = async () => {
       let currentUser = { name: `访客_${Math.floor(Math.random() * 100)}`, isLoggedIn: false };
@@ -47,14 +37,15 @@ export default function App() {
         console.warn("未检测到真实登录接口，默认开启访客模式");
       }
       setUserInfo(currentUser);
-      fetchBoards(currentUser);
+      fetchBoards(currentUser, true); // 传入 true 表示允许自动选择默认白板
     };
     initApp();
   }, []);
 
-  const fetchBoards = async (user) => {
+  // 从数据库拉取所有白板的最新列表与内容
+  const fetchBoards = async (user, autoSelect = false) => {
     const { data, error } = await supabase.from("whiteboards").select("*").order('created_at', { ascending: false });
-    if (error) return console.error(error);
+    if (error) return console.error("拉取数据库失败:", error);
 
     const publicList = [];
     const privateList = [];
@@ -66,33 +57,43 @@ export default function App() {
     setPublicBoards(publicList);
     setPrivateBoards(privateList);
 
-    if (!currentBoard) {
-      if (privateList.length > 0) setCurrentBoard(privateList[0]);
-      else if (publicList.length > 0) setCurrentBoard(publicList[0]);
-      else setCurrentBoard({ id: "local_guest", title: "临时白板(不保存)", is_public: false, owner: user.name, content: [] });
+    // 仅在初始化且没有选择白板时，才自动载入第一个
+    if (autoSelect) {
+      if (privateList.length > 0) handleSelectBoard(privateList[0]);
+      else if (publicList.length > 0) handleSelectBoard(publicList[0]);
+      else handleSelectBoard({ id: "local_guest", title: "临时白板(不保存)", is_public: false, owner: user.name, content: [] });
     }
   };
 
-  // 2. 切换白板与 WebSocket 房间监听
+  // 2. 核心：点击切换白板（从数据库拉取最新的画作内容，直接呈现在画布上）
+  const handleSelectBoard = async (board) => {
+    setCurrentBoard(board);
+    if (!excalidrawAPI) return;
+
+    // 开启初始化锁，防止组件加载时把空画布当成用户的改动广播出去
+    isInitialLoading.current = true;
+    
+    // 把从数据库拿到的内容渲染到画布
+    excalidrawAPI.updateScene({ elements: board.content || [] });
+    lastVersionSum.current = (board.content || []).reduce((sum, el) => sum + el.version, 0);
+
+    // 延迟解锁，确保组件完全渲染完毕
+    setTimeout(() => { isInitialLoading.current = false; }, 300);
+  };
+
+  // 当 excalidrawAPI 准备就绪时，补全首次渲染
+  useEffect(() => {
+    if (excalidrawAPI && currentBoard) {
+      handleSelectBoard(currentBoard);
+    }
+  }, [excalidrawAPI]);
+
+  // 3. 实时通讯房间：进入单独的房间，完全不与数据库交互
   useEffect(() => {
     if (!excalidrawAPI || !currentBoard) return;
 
-    if (lastLoadedId.current !== currentBoard.id) {
-      clearTimeout(dbSaveTimer.current);
-      isInitialLoading.current = true;
-      lastLoadedId.current = currentBoard.id;
-      
-      // 🌟 【第一道防线重置】切换或刷新白板时，重置用户交互状态为 false
-      hasUserInteracted.current = false;
-      // 🌟 【第二道防线初始化】将当前数据库的内容版本记为初始基准版本
-      lastVersionSum.current = getElementsVersionSum(currentBoard.content);
-
-      excalidrawAPI.updateScene({ elements: currentBoard.content || [] });
-      setTimeout(() => { isInitialLoading.current = false; }, 500);
-    }
-
     setOnlineUsers([]);
-    if (!currentBoard.is_public) return;
+    if (!currentBoard.is_public) return; // 如果不是公开画布，不开启实时联机房间
 
     const channelName = `room-${currentBoard.id}`;
     const roomChannel = supabase.channel(channelName, {
@@ -103,10 +104,9 @@ export default function App() {
 
     roomChannel
       .on("broadcast", { event: "draw-sync" }, ({ payload }) => {
+        // 收到其他前端传来的数据，直接呈现在画布上，不经过数据库
         isReceiving.current = true;
-        // 🌟 收到别人广播时，同步更新本地的版本锁，防止当前用户把收到内容当成自己的改动回弹
-        lastVersionSum.current = getElementsVersionSum(payload.elements);
-        
+        lastVersionSum.current = payload.elements.reduce((sum, el) => sum + el.version, 0);
         excalidrawAPI.updateScene({ elements: payload.elements });
         setTimeout(() => { isReceiving.current = false; }, 50);
       })
@@ -114,6 +114,17 @@ export default function App() {
         const presenceState = roomChannel.presenceState();
         const users = Object.keys(presenceState).map(key => ({ name: key }));
         setOnlineUsers(users);
+      })
+      .on("presence", { event: "join" }, ({ newPresences }) => {
+        // 🌟 【黄金逻辑】当有新用户进入网页时，当前房间内的老用户直接将自己画布上的内容“甩”给新来的人
+        // 这样新用户进房立刻就能同步到最新的画作，根本不需要去读写数据库！
+        if (newPresences.length > 0 && !isInitialLoading.current) {
+          roomChannel.send({
+            type: "broadcast",
+            event: "draw-sync",
+            payload: { elements: excalidrawAPI.getSceneElements() },
+          });
+        }
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
@@ -127,57 +138,63 @@ export default function App() {
     };
   }, [excalidrawAPI, currentBoard?.id, currentBoard?.is_public, userInfo.name]);
 
-  // 3. 画布核心改变监听（严密把关）
+  // 4. 作画过程中的 onChange 监听（纯前端传递，0 数据库交互）
   const handleOnChange = (elements) => {
-    if (!currentBoard) return;
+    if (!currentBoard || isReceiving.current || isInitialLoading.current) return;
 
-    // 🌟 计算当前传入的最新图形版本特征和
-    const currentSum = getElementsVersionSum(elements);
-
-    // 🌟【第二道防线校验】如果图形版本特征没有变（说明只是缩放画布、移动视口，或者是组件初始化、刚收到别人的同步），直接安全拦截
+    // 过滤掉无关的缩放、平移等非作画改动
+    const currentSum = elements.reduce((sum, el) => sum + el.version, 0);
     if (currentSum === lastVersionSum.current) return;
-
-    // 如果正在初始化加载或者正在接收别人的画作，只更新本地版本锁，不执行广播和保存
-    if (isReceiving.current || isInitialLoading.current) {
-      lastVersionSum.current = currentSum;
-      return;
-    }
-
-    // 🌟【第一道防线校验】如果用户进入网页后连画布都还没有碰过，任何变更（如初始空画布触发）一律拒绝广播和保存
-    if (!hasUserInteracted.current) return;
-
-    // 通过两道防线，说明是当前用户自己亲手画了新东西，更新版本特征锁
     lastVersionSum.current = currentSum;
 
-    const now = Date.now();
+    // 实时同步缓存在本地内存中
+    currentBoard.content = elements;
 
-    // A. 安全广播
-    if (currentBoard.is_public && channelRef.current && now - lastBroadcastTime.current > 80) {
-      lastBroadcastTime.current = now;
-      channelRef.current?.send({
-        type: "broadcast",
-        event: "draw-sync",
-        payload: { elements },
-      });
-    }
-
-    // B. 安全保存
-    if (userInfo.isLoggedIn && currentBoard.id !== "local_guest") {
-      clearTimeout(dbSaveTimer.current);
-      currentBoard.content = elements; // 内存同步
-
-      dbSaveTimer.current = setTimeout(async () => {
-        await supabase
-          .from("whiteboards")
-          .update({ content: elements, updated_at: new Date().toISOString() })
-          .eq("id", currentBoard.id);
-        console.log("👉 云端保存成功！");
-      }, 1000); 
+    // 如果在公共画布房，直接在前端之间高频传递数据
+    if (currentBoard.is_public && channelRef.current) {
+      const now = Date.now();
+      if (now - lastBroadcastTime.current > 60) { // Throttling 60ms
+        lastBroadcastTime.current = now;
+        channelRef.current.send({
+          type: "broadcast",
+          event: "draw-sync",
+          payload: { elements },
+        });
+      }
     }
   };
 
+  // 5. 🌟 新增功能：提供一个按钮，手动与数据库同步保存
+  const handleManualSave = async () => {
+    if (!userInfo.isLoggedIn) return alert("❌ 请先在左侧切换为【已登录模式】再保存！");
+    if (!currentBoard || currentBoard.id === "local_guest") return alert("本地临时白板无法保存到云端");
+
+    setIsSaving(true);
+    // 获取当前画布上最真实的图形数据
+    const latestElements = excalidrawAPI ? excalidrawAPI.getSceneElements() : currentBoard.content;
+
+    const { error } = await supabase
+      .from("whiteboards")
+      .update({ 
+        content: latestElements, 
+        updated_at: new Date().toISOString() 
+      })
+      .eq("id", currentBoard.id);
+
+    setIsSaving(false);
+
+    if (error) {
+      console.error(error);
+      alert("💾 保存失败：" + error.message);
+    } else {
+      alert("☁️ 已经成功将当前画作同步保存至云端数据库！");
+      fetchBoards(userInfo, false); // 静默刷新左侧列表状态
+    }
+  };
+
+  // 创建新私有白板
   const handleCreateBoard = async () => {
-    if (!userInfo.isLoggedIn) return alert("请先在左下角切换为【已登录模式】测试！");
+    if (!userInfo.isLoggedIn) return alert("请先切换为【已登录模式】");
     const title = prompt("请输入新白板名称：");
     if (!title) return;
 
@@ -190,30 +207,30 @@ export default function App() {
     };
 
     await supabase.from("whiteboards").insert([newBoard]);
-    await fetchBoards(userInfo);
-    setCurrentBoard(newBoard);
+    await fetchBoards(userInfo, false);
+    handleSelectBoard(newBoard);
   };
 
+  // 公开白板（转换为公共大厅协作画布）
   const handlePublish = async (e, board) => {
     e.stopPropagation();
     if (!userInfo.isLoggedIn) return alert("只有登录用户能公开白板");
-    if (window.confirm(`确定要公开【${board.title}】吗？`)) {
+    if (window.confirm(`确定要公开【${board.title}】并开启实时协作吗？`)) {
       await supabase.from("whiteboards").update({ is_public: true }).eq("id", board.id);
       const updated = { ...board, is_public: true };
-      setCurrentBoard(updated);
-      fetchBoards(userInfo);
+      fetchBoards(userInfo, false);
+      handleSelectBoard(updated);
     }
   };
 
   const toggleTestLogin = () => {
     const nextState = !userInfo.isLoggedIn;
     const mockUser = {
-      name: nextState ? "测试员_" + Math.floor(Math.random()*10) : `访客_${Math.floor(Math.random() * 100)}`,
+      name: nextState ? "用户_" + Math.floor(Math.random()*100) : `访客_${Math.floor(Math.random() * 100)}`,
       isLoggedIn: nextState
     };
     setUserInfo(mockUser);
-    fetchBoards(mockUser);
-    setCurrentBoard(null);
+    fetchBoards(mockUser, true);
   };
 
   return (
@@ -231,41 +248,41 @@ export default function App() {
           </div>
         </div>
 
-        {/* 私人列表 */}
+        {/* 私人白板 */}
         <div style={styles.roomSection}>
           <div style={styles.sectionTitle}>
-            <span>🔒 我的私人白板</span>
+            <span>🔒 我的私人白板 (独享)</span>
             {userInfo.isLoggedIn && <button onClick={handleCreateBoard} style={styles.iconBtn}>+</button>}
           </div>
           <div style={styles.roomList}>
             {privateBoards.map((board) => (
-              <div key={board.id} onClick={() => setCurrentBoard(board)}
+              <div key={board.id} onClick={() => handleSelectBoard(board)}
                 style={{...styles.roomItem, ...(currentBoard?.id === board.id ? styles.activeRoom : {})}}>
                 <span style={styles.textEllipsis}>{board.title}</span>
                 <button onClick={(e) => handlePublish(e, board)} style={styles.publishBtn}>公开</button>
               </div>
             ))}
-            {privateBoards.length === 0 && <div style={styles.emptyText}>{userInfo.isLoggedIn ? "暂无，点击右上角+创建" : "登录后可创建私人白板"}</div>}
+            {privateBoards.length === 0 && <div style={styles.emptyText}>{userInfo.isLoggedIn ? "暂无，点击+号创建" : "登录后可创建私人白板"}</div>}
           </div>
         </div>
 
-        {/* 公共列表 */}
+        {/* 公共大厅 */}
         <div style={{...styles.roomSection, marginTop: "20px"}}>
-          <div style={styles.sectionTitle}><span>🌐 公共大厅 (协作)</span></div>
+          <div style={styles.sectionTitle}><span>🌐 公共画布大厅 (多端联机)</span></div>
           <div style={styles.roomList}>
             {publicBoards.map((board) => (
-              <div key={board.id} onClick={() => setCurrentBoard(board)}
+              <div key={board.id} onClick={() => handleSelectBoard(board)}
                 style={{...styles.roomItem, ...(currentBoard?.id === board.id ? styles.activeRoom : {})}}>
                 <span style={styles.textEllipsis}>{board.title}</span>
                 <span style={styles.ownerTag}>by {board.owner}</span>
               </div>
             ))}
-            {publicBoards.length === 0 && <div style={styles.emptyText}>暂无公开白板</div>}
+            {publicBoards.length === 0 && <div style={styles.emptyText}>暂无公开大厅</div>}
           </div>
         </div>
 
         <button onClick={toggleTestLogin} style={styles.testLoginBtn}>
-          ⚙️ 切换为: {userInfo.isLoggedIn ? "访客" : "已登录"} (测试用)
+          ⚙️ 切换为: {userInfo.isLoggedIn ? "访客" : "已登录"} (模拟真实登录)
         </button>
       </div>
 
@@ -276,29 +293,39 @@ export default function App() {
             <h2 style={styles.roomTitle}>{currentBoard?.title || "未选择白板"}</h2>
             {currentBoard && (
               <span style={currentBoard.is_public ? styles.badgePublic : styles.badgePrivate}>
-                {currentBoard.is_public ? "公开同步中" : "离线私密"}
+                {currentBoard.is_public ? "P2P 实时房间连通中" : "本地离线画布"}
               </span>
             )}
           </div>
           
-          {currentBoard?.is_public && (
-            <div style={styles.onlineContainer}>
-              <span style={styles.onlineText}>在线:</span>
-              {onlineUsers.map((u, idx) => (
-                <div key={idx} style={styles.onlineAvatar} title={u.name}>{u.name.charAt(0)}</div>
-              ))}
-            </div>
-          )}
+          <div style={{display: "flex", alignItems: "center", gap: "16px"}}>
+            {/* 🌟 核心提效：手动同步保存到数据库按钮 */}
+            {currentBoard && currentBoard.id !== "local_guest" && (
+              <button 
+                onClick={handleManualSave} 
+                disabled={isSaving}
+                style={{
+                  ...styles.manualSaveBtn, 
+                  backgroundColor: isSaving ? "#9AA0A6" : "#1a73e8"
+                }}
+              >
+                {isSaving ? "正在同步..." : "☁️ 同步保存到云端"}
+              </button>
+            )}
+
+            {currentBoard?.is_public && (
+              <div style={styles.onlineContainer}>
+                <span style={styles.onlineText}>在线看房:</span>
+                {onlineUsers.map((u, idx) => (
+                  <div key={idx} style={styles.onlineAvatar} title={u.name}>{u.name.charAt(0)}</div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         <div style={{ flex: 1, position: "relative", padding: "0 24px 24px 24px" }}>
-          {/* 🌟 核心改动：在 Excalidraw 的外层 div 上绑定事件。只要用户点过鼠标或按过键盘，立刻解锁交互锁 */}
-          <div 
-            className="excalidraw-wrapper" 
-            style={{ width: "100%", height: "100%" }}
-            onPointerDown={() => { hasUserInteracted.current = true; }}
-            onKeyDown={() => { hasUserInteracted.current = true; }}
-          >
+          <div className="excalidraw-wrapper" style={{ width: "100%", height: "100%" }}>
             <Excalidraw 
               excalidrawRef={(api) => setExcalidrawAPI(api)} 
               onChange={handleOnChange}
@@ -311,10 +338,10 @@ export default function App() {
   );
 }
 
-// 样式定义保持原样
+// 样式表
 const styles = {
   container: { display: "flex", height: "100vh", backgroundColor: "var(--md-sys-color-surface)", padding: "16px", boxSizing: "border-box", gap: "16px" },
-  sidebar: { width: "280px", backgroundColor: "var(--md-sys-color-surface-container)", borderRadius: "24px", display: "flex", flexDirection: "column", padding: "20px", boxSizing: "border-box", position: "relative" },
+  sidebar: { width: "280px", backgroundColor: "var(--md-sys-color-surface-container)", borderRadius: "24px", display: "flex", flexDirection: "column", padding: "20px", boxSizing: "border-box" },
   userInfoCard: { display: "flex", alignItems: "center", gap: "16px", paddingBottom: "16px", borderBottom: `1px solid var(--md-sys-color-outline)` },
   avatar: { width: "40px", height: "40px", borderRadius: "20px", backgroundColor: "var(--md-sys-color-primary)", color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "16px", fontWeight: "bold" },
   userName: { fontSize: "15px", fontWeight: "600" },
@@ -338,5 +365,6 @@ const styles = {
   badgePublic: { fontSize: "11px", padding: "2px 6px", backgroundColor: "#CEEAD6", color: "#137333", borderRadius: "6px" },
   onlineContainer: { display: "flex", alignItems: "center", gap: "6px" },
   onlineText: { fontSize: "13px", color: "#5F6368" },
-  onlineAvatar: { width: "28px", height: "28px", borderRadius: "14px", backgroundColor: "var(--md-sys-color-primary)", color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: "bold", border: "2px solid #FFF", marginLeft: "-8px", boxShadow: "0 1px 2px rgba(0,0,0,0.15)" }
+  onlineAvatar: { width: "28px", height: "28px", borderRadius: "14px", backgroundColor: "var(--md-sys-color-primary)", color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: "bold", border: "2px solid #FFF", marginLeft: "-8px", boxShadow: "0 1px 2px rgba(0,0,0,0.15)" },
+  manualSaveBtn: { padding: "8px 16px", color: "white", border: "none", borderRadius: "100px", cursor: "pointer", fontSize: "13px", fontWeight: "600", transition: "background-color 0.2s" }
 };
