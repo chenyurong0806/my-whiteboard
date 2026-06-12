@@ -22,6 +22,7 @@ export default function App() {
   const dbSaveTimer = useRef(null); 
   const isInitialLoading = useRef(false); // 精准控制初始化锁
   const lastLoadedId = useRef(null);      // 记录最后一次加载的白板ID
+  const channelRef = useRef(null);        // 用来保存当前活跃的通道
 
   // 1. 初始化：获取用户信息 & 加载白板列表
   useEffect(() => {
@@ -91,6 +92,7 @@ export default function App() {
     const roomChannel = supabase.channel(channelName, {
       config: { presence: { key: userInfo.name } },
     });
+    channelRef.current = roomChannel; //把接通的电话线存起来
 
     roomChannel
       .on("broadcast", { event: "draw-sync" }, ({ payload }) => {
@@ -111,6 +113,7 @@ export default function App() {
 
     return () => {
       supabase.removeChannel(roomChannel);
+      channelRef.current = null;
     };
     // 💡 关键修复：把 currentBoard.is_public 补进依赖项，状态一变，立刻重连 WebSocket！
   }, [excalidrawAPI, currentBoard?.id, currentBoard?.is_public, userInfo.name]);
@@ -124,8 +127,8 @@ export default function App() {
 
     // A. 广播逻辑
     if (currentBoard.is_public && now - lastBroadcastTime.current > 80) {
-      lastBroadcastTime.current = now;
-      supabase.channel(`room-${currentBoard.id}`).send({
+    // 改为直接用 channelRef.current 发送
+      channelRef.current.send({
         type: "broadcast",
         event: "draw-sync",
         payload: { elements },
