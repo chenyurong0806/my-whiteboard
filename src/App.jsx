@@ -13,17 +13,18 @@ export default function App() {
   const [publicBoards, setPublicBoards] = useState([]);
   const [currentBoard, setCurrentBoard] = useState(null); 
   const [onlineUsers, setOnlineUsers] = useState([]);
-  const [excalidrawAPI, setExcalidrawAPI] = useState(null);
-  const [isSaving, setIsSaving] = useState(false); // 保存状态锁
+  const [apiReady, setApiReady] = useState(false); // 核心：画布 API 准备就绪状态
+  const [isSaving, setIsSaving] = useState(false);
 
-  // === 性能与纯前端同步锁 ===
+  // === 严格状态控制 refs ===
+  const excalidrawAPIRef = useRef(null); // 使用稳定的 Ref 存储 API，避免触发频繁重绘
   const isReceiving = useRef(false);
-  const isInitialLoading = useRef(false);
+  const isInitialLoading = useRef(false); // 确定性生命周期加载锁
   const lastBroadcastTime = useRef(0);
-  const lastVersionSum = useRef(0);
+  const lastVersionSum = useRef(0); // 核心：版本特征锁指针
   const channelRef = useRef(null);
 
-  // 1. 初始化用户信息与列表（只在页面首次打开时向后端发一次请求）
+  // 1. 初始化用户和列表
   useEffect(() => {
     const initApp = async () => {
       let currentUser = { name: `访客_${Math.floor(Math.random() * 100)}`, isLoggedIn: false };
@@ -37,12 +38,11 @@ export default function App() {
         console.warn("未检测到真实登录接口，默认开启访客模式");
       }
       setUserInfo(currentUser);
-      fetchBoards(currentUser, true); // 传入 true 表示允许自动选择默认白板
+      fetchBoards(currentUser, true);
     };
     initApp();
   }, []);
 
-  // 从数据库拉取所有白板的最新列表与内容
   const fetchBoards = async (user, autoSelect = false) => {
     const { data, error } = await supabase.from("whiteboards").select("*").order('created_at', { ascending: false });
     if (error) return console.error("拉取数据库失败:", error);
@@ -57,43 +57,53 @@ export default function App() {
     setPublicBoards(publicList);
     setPrivateBoards(privateList);
 
-    // 仅在初始化且没有选择白板时，才自动载入第一个
     if (autoSelect) {
-      if (privateList.length > 0) handleSelectBoard(privateList[0]);
-      else if (publicList.length > 0) handleSelectBoard(publicList[0]);
-      else handleSelectBoard({ id: "local_guest", title: "临时白板(不保存)", is_public: false, owner: user.name, content: [] });
+      if (privateList.length > 0) setCurrentBoard(privateList[0]);
+      else if (publicList.length > 0) setCurrentBoard(publicList[0]);
+      else setCurrentBoard({ id: "local_guest", title: "临时白板(不保存)", is_public: false, owner: user.name, content: [] });
     }
   };
 
-  // 2. 核心：点击切换白板（从数据库拉取最新的画作内容，直接呈现在画布上）
-  const handleSelectBoard = async (board) => {
-    setCurrentBoard(board);
-    if (!excalidrawAPI) return;
+  // 2. 🛡️ 【钢铁防线一】严格的数据反渲染逻辑（当白板切换或 API 准备就绪时触发）
+  useEffect(() => {
+    const api = excalidrawAPIRef.current;
+    if (!api || !currentBoard) return;
 
-    // 开启初始化锁，防止组件加载时把空画布当成用户的改动广播出去
+    console.log("🔄 正在将云端数据安全注入画布，白板ID:", currentBoard.id);
+
+    // 兼容判定：容错处理 Supabase 中储存为 string 或者是标准的 jsonb 格式
+    let elements = [];
+    if (currentBoard.content) {
+      try {
+        elements = typeof currentBoard.content === "string" 
+          ? JSON.parse(currentBoard.content) 
+          : currentBoard.content;
+      } catch (e) {
+        console.error("解析画作内容数据失败:", e);
+      }
+    }
+
+    if (!Array.isArray(elements)) elements = [];
+
+    // 🌟 1. 开启绝对初始化加载锁
     isInitialLoading.current = true;
     
-    // 把从数据库拿到的内容渲染到画布
-    excalidrawAPI.updateScene({ elements: board.content || [] });
-    lastVersionSum.current = (board.content || []).reduce((sum, el) => sum + el.version, 0);
+    // 🌟 2. 提前计算出即将载入图形的版本特征总和
+    const loadedSum = elements.reduce((sum, el) => sum + el.version, 0);
+    lastVersionSum.current = loadedSum;
 
-    // 延迟解锁，确保组件完全渲染完毕
-    setTimeout(() => { isInitialLoading.current = false; }, 300);
-  };
+    // 🌟 3. 强行灌入画布
+    api.updateScene({ elements: elements });
+    
+    console.log("等待 Excalidraw 内部状态消费，目标特征和为:", loadedSum);
+  }, [currentBoard?.id, apiReady]);
 
-  // 当 excalidrawAPI 准备就绪时，补全首次渲染
+  // 3. 📡 【钢铁防线二】请求-响应式实时联机大厅（完全不污染数据库）
   useEffect(() => {
-    if (excalidrawAPI && currentBoard) {
-      handleSelectBoard(currentBoard);
-    }
-  }, [excalidrawAPI]);
-
-  // 3. 实时通讯房间：进入单独的房间，完全不与数据库交互
-  useEffect(() => {
-    if (!excalidrawAPI || !currentBoard) return;
+    if (!excalidrawAPIRef.current || !currentBoard) return;
 
     setOnlineUsers([]);
-    if (!currentBoard.is_public) return; // 如果不是公开画布，不开启实时联机房间
+    if (!currentBoard.is_public) return;
 
     const channelName = `room-${currentBoard.id}`;
     const roomChannel = supabase.channel(channelName, {
@@ -103,11 +113,28 @@ export default function App() {
     channelRef.current = roomChannel;
 
     roomChannel
+      // 🌟 A 监听：收到新进房用户的同步请求，老兵把当前最完美的画布“甩”给新兵
+      .on("broadcast", { event: "request-canvas" }, ({ payload }) => {
+        if (payload?.sender !== userInfo.name && !isInitialLoading.current && excalidrawAPIRef.current) {
+          console.log(`接收到新用户 [${payload?.sender}] 的求助，正在定向单向投喂画布...`);
+          roomChannel.send({
+            type: "broadcast",
+            event: "draw-sync",
+            payload: { elements: excalidrawAPIRef.current.getSceneElements() },
+          });
+        }
+      })
+      // B 监听：接收实时的画笔轨迹
       .on("broadcast", { event: "draw-sync" }, ({ payload }) => {
-        // 收到其他前端传来的数据，直接呈现在画布上，不经过数据库
         isReceiving.current = true;
-        lastVersionSum.current = payload.elements.reduce((sum, el) => sum + el.version, 0);
-        excalidrawAPI.updateScene({ elements: payload.elements });
+        const receivedElements = payload.elements || [];
+        
+        // 收到广播数据时，立刻同步本地的版本锁，严防回弹
+        lastVersionSum.current = receivedElements.reduce((sum, el) => sum + el.version, 0);
+        excalidrawAPIRef.current?.updateScene({ elements: receivedElements });
+        
+        if (currentBoard) currentBoard.content = receivedElements; // 内存缓存
+
         setTimeout(() => { isReceiving.current = false; }, 50);
       })
       .on("presence", { event: "sync" }, () => {
@@ -115,20 +142,15 @@ export default function App() {
         const users = Object.keys(presenceState).map(key => ({ name: key }));
         setOnlineUsers(users);
       })
-      .on("presence", { event: "join" }, ({ newPresences }) => {
-        // 🌟 【黄金逻辑】当有新用户进入网页时，当前房间内的老用户直接将自己画布上的内容“甩”给新来的人
-        // 这样新用户进房立刻就能同步到最新的画作，根本不需要去读写数据库！
-        if (newPresences.length > 0 && !isInitialLoading.current) {
-          roomChannel.send({
-            type: "broadcast",
-            event: "draw-sync",
-            payload: { elements: excalidrawAPI.getSceneElements() },
-          });
-        }
-      })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
           await roomChannel.track({ user: userInfo.name });
+          // 🌟 C 投路问标：新用户进房成功订阅后，在房间里大喊一声求数据，拒绝盲目广播空画布
+          roomChannel.send({
+            type: "broadcast",
+            event: "request-canvas",
+            payload: { sender: userInfo.name }
+          });
         }
       });
 
@@ -136,24 +158,38 @@ export default function App() {
       supabase.removeChannel(roomChannel);
       channelRef.current = null;
     };
-  }, [excalidrawAPI, currentBoard?.id, currentBoard?.is_public, userInfo.name]);
+  }, [currentBoard?.id, currentBoard?.is_public, userInfo.name]);
 
-  // 4. 作画过程中的 onChange 监听（纯前端传递，0 数据库交互）
+  // 4. 🎛️ 【核心中枢】画布唯一 onChange 判定状态机
   const handleOnChange = (elements) => {
-    if (!currentBoard || isReceiving.current || isInitialLoading.current) return;
-
-    // 过滤掉无关的缩放、平移等非作画改动
     const currentSum = elements.reduce((sum, el) => sum + el.version, 0);
+
+    // 🌟【确定性解密锁】核心突破点
+    if (isInitialLoading.current) {
+      // 只有当 Excalidraw 内部真正把刚才注入的图形渲染上屏，并吐出匹配的版本特征和时，锁才精准解开！
+      if (currentSum === lastVersionSum.current) {
+        isInitialLoading.current = false;
+        console.log("🎯 确定性比对一致！组件已渲染成功，加载锁精准解除。");
+      }
+      return; // 初始化中，一律封锁，不允许往外传递任何数据
+    }
+
+    if (isReceiving.current) {
+      lastVersionSum.current = currentSum;
+      return;
+    }
+
+    // 拦截无意义的高频画布缩放、视口平移
     if (currentSum === lastVersionSum.current) return;
+    
+    // 穿透拦截，确认是用户本人在作画
     lastVersionSum.current = currentSum;
+    if (currentBoard) currentBoard.content = elements; // 刷新内存
 
-    // 实时同步缓存在本地内存中
-    currentBoard.content = elements;
-
-    // 如果在公共画布房，直接在前端之间高频传递数据
-    if (currentBoard.is_public && channelRef.current) {
+    // 纯前端 P2P 瞬间高频广播
+    if (currentBoard?.is_public && channelRef.current) {
       const now = Date.now();
-      if (now - lastBroadcastTime.current > 60) { // Throttling 60ms
+      if (now - lastBroadcastTime.current > 60) {
         lastBroadcastTime.current = now;
         channelRef.current.send({
           type: "broadcast",
@@ -164,14 +200,13 @@ export default function App() {
     }
   };
 
-  // 5. 🌟 新增功能：提供一个按钮，手动与数据库同步保存
+  // 5. 手动同步归档到数据库锁
   const handleManualSave = async () => {
-    if (!userInfo.isLoggedIn) return alert("❌ 请先在左侧切换为【已登录模式】再保存！");
-    if (!currentBoard || currentBoard.id === "local_guest") return alert("本地临时白板无法保存到云端");
+    if (!userInfo.isLoggedIn) return alert("❌ 请先在左侧切换为【已登录模式】！");
+    if (!currentBoard || currentBoard.id === "local_guest") return alert("临时白板无法归档");
 
     setIsSaving(true);
-    // 获取当前画布上最真实的图形数据
-    const latestElements = excalidrawAPI ? excalidrawAPI.getSceneElements() : currentBoard.content;
+    const latestElements = excalidrawAPIRef.current ? excalidrawAPIRef.current.getSceneElements() : currentBoard.content;
 
     const { error } = await supabase
       .from("whiteboards")
@@ -184,15 +219,13 @@ export default function App() {
     setIsSaving(false);
 
     if (error) {
-      console.error(error);
-      alert("💾 保存失败：" + error.message);
+      alert("💾 保存归档失败：" + error.message);
     } else {
-      alert("☁️ 已经成功将当前画作同步保存至云端数据库！");
-      fetchBoards(userInfo, false); // 静默刷新左侧列表状态
+      alert("☁️ 存档锁定成功！当前画作已作为云端最新版本备份。");
+      fetchBoards(userInfo, false);
     }
   };
 
-  // 创建新私有白板
   const handleCreateBoard = async () => {
     if (!userInfo.isLoggedIn) return alert("请先切换为【已登录模式】");
     const title = prompt("请输入新白板名称：");
@@ -208,25 +241,24 @@ export default function App() {
 
     await supabase.from("whiteboards").insert([newBoard]);
     await fetchBoards(userInfo, false);
-    handleSelectBoard(newBoard);
+    setCurrentBoard(newBoard);
   };
 
-  // 公开白板（转换为公共大厅协作画布）
   const handlePublish = async (e, board) => {
     e.stopPropagation();
     if (!userInfo.isLoggedIn) return alert("只有登录用户能公开白板");
-    if (window.confirm(`确定要公开【${board.title}】并开启实时协作吗？`)) {
+    if (window.confirm(`确定要公开【${board.title}】并开启联机大厅吗？`)) {
       await supabase.from("whiteboards").update({ is_public: true }).eq("id", board.id);
       const updated = { ...board, is_public: true };
       fetchBoards(userInfo, false);
-      handleSelectBoard(updated);
+      setCurrentBoard(updated);
     }
   };
 
   const toggleTestLogin = () => {
     const nextState = !userInfo.isLoggedIn;
     const mockUser = {
-      name: nextState ? "用户_" + Math.floor(Math.random()*100) : `访客_${Math.floor(Math.random() * 100)}`,
+      name: nextState ? "核心创作者_" + Math.floor(Math.random()*10) : `访客_${Math.floor(Math.random() * 100)}`,
       isLoggedIn: nextState
     };
     setUserInfo(mockUser);
@@ -248,41 +280,39 @@ export default function App() {
           </div>
         </div>
 
-        {/* 私人白板 */}
         <div style={styles.roomSection}>
           <div style={styles.sectionTitle}>
-            <span>🔒 我的私人白板 (独享)</span>
+            <span>🔒 我的私人白板</span>
             {userInfo.isLoggedIn && <button onClick={handleCreateBoard} style={styles.iconBtn}>+</button>}
           </div>
           <div style={styles.roomList}>
             {privateBoards.map((board) => (
-              <div key={board.id} onClick={() => handleSelectBoard(board)}
+              <div key={board.id} onClick={() => setCurrentBoard(board)}
                 style={{...styles.roomItem, ...(currentBoard?.id === board.id ? styles.activeRoom : {})}}>
                 <span style={styles.textEllipsis}>{board.title}</span>
                 <button onClick={(e) => handlePublish(e, board)} style={styles.publishBtn}>公开</button>
               </div>
             ))}
-            {privateBoards.length === 0 && <div style={styles.emptyText}>{userInfo.isLoggedIn ? "暂无，点击+号创建" : "登录后可创建私人白板"}</div>}
+            {privateBoards.length === 0 && <div style={styles.emptyText}>{userInfo.isLoggedIn ? "暂无，点击+创建" : "登录后开启"}</div>}
           </div>
         </div>
 
-        {/* 公共大厅 */}
         <div style={{...styles.roomSection, marginTop: "20px"}}>
-          <div style={styles.sectionTitle}><span>🌐 公共画布大厅 (多端联机)</span></div>
+          <div style={styles.sectionTitle}><span>🌐 公共联机协同大厅</span></div>
           <div style={styles.roomList}>
             {publicBoards.map((board) => (
-              <div key={board.id} onClick={() => handleSelectBoard(board)}
+              <div key={board.id} onClick={() => setCurrentBoard(board)}
                 style={{...styles.roomItem, ...(currentBoard?.id === board.id ? styles.activeRoom : {})}}>
                 <span style={styles.textEllipsis}>{board.title}</span>
                 <span style={styles.ownerTag}>by {board.owner}</span>
               </div>
             ))}
-            {publicBoards.length === 0 && <div style={styles.emptyText}>暂无公开大厅</div>}
+            {publicBoards.length === 0 && <div style={styles.emptyText}>暂无公共画布</div>}
           </div>
         </div>
 
         <button onClick={toggleTestLogin} style={styles.testLoginBtn}>
-          ⚙️ 切换为: {userInfo.isLoggedIn ? "访客" : "已登录"} (模拟真实登录)
+          ⚙️ 模拟切换: {userInfo.isLoggedIn ? "访客" : "已登录账号"}
         </button>
       </div>
 
@@ -293,29 +323,22 @@ export default function App() {
             <h2 style={styles.roomTitle}>{currentBoard?.title || "未选择白板"}</h2>
             {currentBoard && (
               <span style={currentBoard.is_public ? styles.badgePublic : styles.badgePrivate}>
-                {currentBoard.is_public ? "P2P 实时房间连通中" : "本地离线画布"}
+                {currentBoard.is_public ? "P2P 毫秒级联机房" : "独立隔离沙盒"}
               </span>
             )}
           </div>
           
           <div style={{display: "flex", alignItems: "center", gap: "16px"}}>
-            {/* 🌟 核心提效：手动同步保存到数据库按钮 */}
             {currentBoard && currentBoard.id !== "local_guest" && (
-              <button 
-                onClick={handleManualSave} 
-                disabled={isSaving}
-                style={{
-                  ...styles.manualSaveBtn, 
-                  backgroundColor: isSaving ? "#9AA0A6" : "#1a73e8"
-                }}
-              >
-                {isSaving ? "正在同步..." : "☁️ 同步保存到云端"}
+              <button onClick={handleManualSave} disabled={isSaving}
+                style={{...styles.manualSaveBtn, backgroundColor: isSaving ? "#9AA0A6" : "#1a73e8"}}>
+                {isSaving ? "云端锁定中..." : "☁️ 手动同步存档到云端"}
               </button>
             )}
 
             {currentBoard?.is_public && (
               <div style={styles.onlineContainer}>
-                <span style={styles.onlineText}>在线看房:</span>
+                <span style={styles.onlineText}>协同中:</span>
                 {onlineUsers.map((u, idx) => (
                   <div key={idx} style={styles.onlineAvatar} title={u.name}>{u.name.charAt(0)}</div>
                 ))}
@@ -326,8 +349,14 @@ export default function App() {
 
         <div style={{ flex: 1, position: "relative", padding: "0 24px 24px 24px" }}>
           <div className="excalidraw-wrapper" style={{ width: "100%", height: "100%" }}>
+            {/* 🌟 绑定标准的组件引用，严控重绘周期 */}
             <Excalidraw 
-              excalidrawRef={(api) => setExcalidrawAPI(api)} 
+              excalidrawRef={(api) => {
+                if (api && !excalidrawAPIRef.current) {
+                  excalidrawAPIRef.current = api;
+                  setApiReady(true); // 激活就绪开关
+                }
+              }} 
               onChange={handleOnChange}
               theme="light" 
             />
@@ -338,7 +367,6 @@ export default function App() {
   );
 }
 
-// 样式表
 const styles = {
   container: { display: "flex", height: "100vh", backgroundColor: "var(--md-sys-color-surface)", padding: "16px", boxSizing: "border-box", gap: "16px" },
   sidebar: { width: "280px", backgroundColor: "var(--md-sys-color-surface-container)", borderRadius: "24px", display: "flex", flexDirection: "column", padding: "20px", boxSizing: "border-box" },
