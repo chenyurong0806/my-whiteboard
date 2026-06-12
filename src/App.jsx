@@ -25,24 +25,6 @@ export default function App() {
   const channelRef = useRef(null);
 
   // 1. 初始化用户和列表
-  useEffect(() => {
-    const initApp = async () => {
-      let currentUser = { name: `访客_${Math.floor(Math.random() * 100)}`, isLoggedIn: false };
-      try {
-        const res = await fetch("/api/userinfo");
-        if (res.ok) {
-          const data = await res.json();
-          currentUser = { name: data.username, isLoggedIn: true };
-        }
-      } catch (e) {
-        console.warn("未检测到真实登录接口，默认开启访客模式");
-      }
-      setUserInfo(currentUser);
-      fetchBoards(currentUser, true);
-    };
-    initApp();
-  }, []);
-
   const fetchBoards = async (user, autoSelect = false) => {
     const { data, error } = await supabase.from("whiteboards").select("*").order('created_at', { ascending: false });
     if (error) return console.error("拉取数据库失败:", error);
@@ -64,101 +46,11 @@ export default function App() {
     }
   };
 
-  // 2. 🛡️ 【钢铁防线一】严格的数据反渲染逻辑（当白板切换或 API 准备就绪时触发）
   useEffect(() => {
-    const api = excalidrawAPIRef.current;
-    if (!api || !currentBoard) return;
-
-    console.log("🔄 正在将云端数据安全注入画布，白板ID:", currentBoard.id);
-
-    // 兼容判定：容错处理 Supabase 中储存为 string 或者是标准的 jsonb 格式
-    let elements = [];
-    if (currentBoard.content) {
-      try {
-        elements = typeof currentBoard.content === "string" 
-          ? JSON.parse(currentBoard.content) 
-          : currentBoard.content;
-      } catch (e) {
-        console.error("解析画作内容数据失败:", e);
-      }
+    if (currentBoard && apiReady) {
+      loadBoardToCanvas(currentBoard);
     }
-
-    if (!Array.isArray(elements)) elements = [];
-
-    // 🌟 1. 开启绝对初始化加载锁
-    isInitialLoading.current = true;
-    
-    // 🌟 2. 提前计算出即将载入图形的版本特征总和
-    const loadedSum = elements.reduce((sum, el) => sum + el.version, 0);
-    lastVersionSum.current = loadedSum;
-
-    // 🌟 3. 强行灌入画布
-    api.updateScene({ elements: elements });
-    
-    console.log("等待 Excalidraw 内部状态消费，目标特征和为:", loadedSum);
-  }, [currentBoard?.id, apiReady]);
-
-  // 3. 📡 【钢铁防线二】请求-响应式实时联机大厅（完全不污染数据库）
-  useEffect(() => {
-    if (!excalidrawAPIRef.current || !currentBoard) return;
-
-    setOnlineUsers([]);
-    if (!currentBoard.is_public) return;
-
-    const channelName = `room-${currentBoard.id}`;
-    const roomChannel = supabase.channel(channelName, {
-      config: { presence: { key: userInfo.name } },
-    });
-
-    channelRef.current = roomChannel;
-
-    roomChannel
-      // 🌟 A 监听：收到新进房用户的同步请求，老兵把当前最完美的画布“甩”给新兵
-      .on("broadcast", { event: "request-canvas" }, ({ payload }) => {
-        if (payload?.sender !== userInfo.name && !isInitialLoading.current && excalidrawAPIRef.current) {
-          console.log(`接收到新用户 [${payload?.sender}] 的求助，正在定向单向投喂画布...`);
-          roomChannel.send({
-            type: "broadcast",
-            event: "draw-sync",
-            payload: { elements: excalidrawAPIRef.current.getSceneElements() },
-          });
-        }
-      })
-      // B 监听：接收实时的画笔轨迹
-      .on("broadcast", { event: "draw-sync" }, ({ payload }) => {
-        isReceiving.current = true;
-        const receivedElements = payload.elements || [];
-        
-        // 收到广播数据时，立刻同步本地的版本锁，严防回弹
-        lastVersionSum.current = receivedElements.reduce((sum, el) => sum + el.version, 0);
-        excalidrawAPIRef.current?.updateScene({ elements: receivedElements });
-        
-        if (currentBoard) currentBoard.content = receivedElements; // 内存缓存
-
-        setTimeout(() => { isReceiving.current = false; }, 50);
-      })
-      .on("presence", { event: "sync" }, () => {
-        const presenceState = roomChannel.presenceState();
-        const users = Object.keys(presenceState).map(key => ({ name: key }));
-        setOnlineUsers(users);
-      })
-      .subscribe(async (status) => {
-        if (status === "SUBSCRIBED") {
-          await roomChannel.track({ user: userInfo.name });
-          // 🌟 C 投路问标：新用户进房成功订阅后，在房间里大喊一声求数据，拒绝盲目广播空画布
-          roomChannel.send({
-            type: "broadcast",
-            event: "request-canvas",
-            payload: { sender: userInfo.name }
-          });
-        }
-      });
-
-    return () => {
-      supabase.removeChannel(roomChannel);
-      channelRef.current = null;
-    };
-  }, [currentBoard?.id, currentBoard?.is_public, userInfo.name]);
+  }, [currentBoard, apiReady]);
 
   // 4. 🎛️ 【核心中枢】画布唯一 onChange 判定状态机
   const handleOnChange = (elements) => {
@@ -350,15 +242,22 @@ export default function App() {
         <div style={{ flex: 1, position: "relative", padding: "0 24px 24px 24px" }}>
           <div className="excalidraw-wrapper" style={{ width: "100%", height: "100%" }}>
             {/* 🌟 绑定标准的组件引用，严控重绘周期 */}
-            <Excalidraw 
-              excalidrawRef={(api) => {
-                if (api && !excalidrawAPIRef.current) {
-                  excalidrawAPIRef.current = api;
-                  setApiReady(true); // 激活就绪开关
+            <Excalidraw
+              excalidrawAPI={(api) => {
+                excalidrawAPIRef.current = api;
+
+                console.log("Excalidraw API Ready");
+
+                setApiReady(true);
+
+                if (currentBoard) {
+                  setTimeout(() => {
+                    loadBoardToCanvas(currentBoard);
+                  }, 100);
                 }
-              }} 
+              }}
               onChange={handleOnChange}
-              theme="light" 
+              theme="light"
             />
           </div>
         </div>
