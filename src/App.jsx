@@ -125,10 +125,12 @@ export default function App() {
 
     const now = Date.now();
 
-    // A. 广播逻辑
-    if (currentBoard.is_public && now - lastBroadcastTime.current > 80) {
-    // 改为直接用 channelRef.current 发送
-      channelRef.current.send({
+    // A. 广播逻辑 —— 加上安全的空值判定 👇
+    if (currentBoard?.is_public && channelRef.current && now - lastBroadcastTime.current > 80) {
+      lastBroadcastTime.current = now;
+      
+      // 加上问号 channelRef.current?.send(...) 哪怕网络延迟是 null 也会安全跳过不报错
+      channelRef.current?.send({
         type: "broadcast",
         event: "draw-sync",
         payload: { elements },
