@@ -4,8 +4,8 @@ import { createClient } from "@supabase/supabase-js";
 import "@excalidraw/excalidraw/index.css";
 
 // ⚠️ 替换为你自己的 Supabase 配置
-const SUPABASE_URL = "你的_SUPABASE_URL";
-const SUPABASE_ANON_KEY = "你的_SUPABASE_ANON_KEY";
+const SUPABASE_URL = "https://mamubvgmcetepllznifl.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_HEeNPSqD75cWlnmZjcVHKA_Pw-OdL_A";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 export default function App() {
