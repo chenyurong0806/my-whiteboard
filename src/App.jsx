@@ -405,8 +405,8 @@ export default function App() {
         <div style={{ flex: 1, position: "relative" }}>
           <Excalidraw
             excalidrawAPI={(api) => { excalidrawAPIRef.current = api; }}
-            onChange={handleOnChange}                {/* 规范后的三参数标准写法 */}
-            onPointerUpdate={handlePointerUpdate}   {/* 改动后的轻量级广播载荷 */}
+            onChange={handleOnChange}
+            onPointerUpdate={handlePointerUpdate}
             theme="light"
             UIOptions={{ canvasActions: { toggleTheme: false } }}
           />
