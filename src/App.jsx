@@ -4,55 +4,35 @@ import { Excalidraw } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import { createClient } from "@supabase/supabase-js";
 
-// ---------------- Supabase 配置 ----------------
 const SUPABASE_URL = "https://mamubvgmcetepllznifl.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_HEeNPSqD75cWlnmZjcVHKA_Pw-OdL_A";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// ---------------- 注入过渡动画样式 ----------------
 const injectCSS = () => {
   if (document.getElementById("excalidraw-custom-styles")) return;
   const style = document.createElement("style");
   style.id = "excalidraw-custom-styles";
   style.innerHTML = `
-    .sidebar-transition {
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    }
-    .hide-scrollbar::-webkit-scrollbar {
-      display: none;
-    }
+    .sidebar-transition { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+    .hide-scrollbar::-webkit-scrollbar { display: none; }
   `;
   document.head.appendChild(style);
 };
 
-// ---------------- 兼容性 JSONB 解析器 ----------------
 const parseContent = (content) => {
   if (!content) return { elements: [], version: 0, senderId: "" };
-  if (Array.isArray(content)) {
-    return { elements: content, version: 0, senderId: "" };
-  }
+  if (Array.isArray(content)) return { elements: content, version: 0, senderId: "" };
   if (typeof content === "string") {
     try {
       const parsed = JSON.parse(content);
       if (Array.isArray(parsed)) return { elements: parsed, version: 0, senderId: "" };
-      return {
-        elements: parsed.elements || [],
-        version: parsed.version || 0,
-        senderId: parsed.senderId || ""
-      };
-    } catch {
-      return { elements: [], version: 0, senderId: "" };
-    }
+      return { elements: parsed.elements || [], version: parsed.version || 0, senderId: parsed.senderId || "" };
+    } catch { return { elements: [], version: 0, senderId: "" }; }
   }
-  return {
-    elements: content.elements || [],
-    version: content.version || 0,
-    senderId: content.senderId || ""
-  };
+  return { elements: content.elements || [], version: content.version || 0, senderId: content.senderId || "" };
 };
 
 export default function App() {
-  // ---------------- 状态管理 ----------------
   const [userInfo, setUserInfo] = useState({ id: "", name: "访客", isLoggedIn: false });
   const [publicBoards, setPublicBoards] = useState([]);
   const [privateBoards, setPrivateBoards] = useState([]);
@@ -61,23 +41,20 @@ export default function App() {
   const [isSaving, setIsSaving] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
-  // ---------------- 核心控制引用 ----------------
   const excalidrawAPIRef = useRef(null);
   const saveTimer = useRef(null);
   const channelRef = useRef(null);
   
-  // 核心控制 Ref
-  const versionRef = useRef(0);                 // 本地版本计数器
-  const isRemoteUpdatingRef = useRef(false);    // 远端更新状态锁
-  const lastSaveTimeRef = useRef(0);            // 节流时间戳
+  const versionRef = useRef(0);                 
+  const isRemoteUpdatingRef = useRef(false);    
+  const lastSaveTimeRef = useRef(0);            
+  const lastPointerSendTimeRef = useRef(0);     // 🟢 指针限流时间戳
   
-  // 🟢 修复方案引入的 Ref
-  const collaboratorsRef = useRef(new Map());   // 独立维护的所有协作者光标 Map
-  const isChannelReadyRef = useRef(false);      // 频道 WebSocket 就绪锁
+  const collaboratorsRef = useRef(new Map());   
+  const isChannelReadyRef = useRef(false);      
 
   useEffect(() => { injectCSS(); }, []);
 
-  // ---------------- 1. 初始化用户与列表 ----------------
   useEffect(() => {
     const initUser = async () => {
       const randomId = Math.random().toString(36).substring(2, 10);
@@ -96,55 +73,28 @@ export default function App() {
   }, []);
 
   const fetchBoards = async () => {
-    const { data, error } = await supabase
-      .from("whiteboards")
-      .select("*")
-      .order("updated_at", { ascending: false });
-
+    const { data, error } = await supabase.from("whiteboards").select("*").order("updated_at", { ascending: false });
     if (error) return console.error("获取白板失败:", error);
-
-    const publicList = data.filter(b => b.is_public);
-    const privateList = data.filter(b => b.owner === userInfo.name && !b.is_public);
-
-    setPublicBoards(publicList);
-    setPrivateBoards(privateList);
-
-    if (!currentBoard) {
-      if (privateList.length > 0) setCurrentBoard(privateList[0]);
-      else if (publicList.length > 0) setCurrentBoard(publicList[0]);
-    }
+    setPublicBoards(data.filter(b => b.is_public));
+    setPrivateBoards(data.filter(b => b.owner === userInfo.name && !b.is_public));
+    if (!currentBoard && data.length > 0) setCurrentBoard(data[0]);
   };
 
-  // ---------------- 2. 实时数据库变更与光标监听 ----------------
   useEffect(() => {
     if (!currentBoard?.id || !userInfo.id) return;
 
-    // 重置就绪状态和光标缓存
     isChannelReadyRef.current = false;
     collaboratorsRef.current.clear();
-
     if (channelRef.current) supabase.removeChannel(channelRef.current);
 
     const channel = supabase.channel(`board_${currentBoard.id}`);
     channelRef.current = channel;
 
     channel
-      // A. 监听 Postgres Changes 数据表 UPDATE 变更
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "whiteboards",
-          filter: `id=eq.${currentBoard.id}`
-        },
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "whiteboards", filter: `id=eq.${currentBoard.id}` }, 
         (payload) => {
           const remoteContent = parseContent(payload.new.content);
-
-          // 接收端 version 判断
-          if (remoteContent.senderId === userInfo.id || remoteContent.version <= versionRef.current) {
-            return;
-          }
+          if (remoteContent.senderId === userInfo.id || remoteContent.version <= versionRef.current) return;
 
           versionRef.current = remoteContent.version;
           isRemoteUpdatingRef.current = true;
@@ -154,14 +104,12 @@ export default function App() {
             commitToHistory: false
           });
           
-          setTimeout(() => { isRemoteUpdatingRef.current = false; }, 50);
+          setTimeout(() => { isRemoteUpdatingRef.current = false; }, 60);
         }
       )
-      // B. 监听实时光标广播数据
       .on("broadcast", { event: "pointer_update" }, ({ payload }) => {
         if (payload.userId === userInfo.id || !excalidrawAPIRef.current) return;
         
-        // 🟢 修复：改用本地维护的 collaboratorsRef 写入，规避 getCollaborators 报错
         collaboratorsRef.current.set(payload.userId, {
           pointer: payload.pointer,
           button: payload.button || "up",
@@ -169,16 +117,12 @@ export default function App() {
           selectedElementIds: payload.selectedElementIds || {}
         });
         
-        excalidrawAPIRef.current.updateScene({ 
-          collaborators: collaboratorsRef.current 
-        });
+        excalidrawAPIRef.current.updateScene({ collaborators: collaboratorsRef.current });
       })
-      // C. 在线状态同步与幽灵指针清理
       .on("presence", { event: "sync" }, () => {
         const state = channel.presenceState();
         setOnlineUsers(new Map(Object.entries(state)));
         
-        // 🟢 动态清理已经离线的用户光标
         const activeUserIds = new Set(Object.keys(state));
         let hasChanged = false;
         for (const userId of collaboratorsRef.current.keys()) {
@@ -193,41 +137,42 @@ export default function App() {
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          // 🟢 修复：标记通道完全就绪，允许向外发送广播
           isChannelReadyRef.current = true;
           await channel.track({ name: userInfo.name });
         }
       });
 
     loadBoardToCanvas(currentBoard);
-
-    return () => { 
-      isChannelReadyRef.current = false;
-      supabase.removeChannel(channel); 
-    };
+    return () => { isChannelReadyRef.current = false; supabase.removeChannel(channel); };
   }, [currentBoard?.id, userInfo.id]);
 
   const loadBoardToCanvas = (board) => {
     if (!excalidrawAPIRef.current || !board) return;
     const parsed = parseContent(board.content);
-    
     versionRef.current = parsed.version; 
     isRemoteUpdatingRef.current = true;
     excalidrawAPIRef.current.updateScene({ elements: parsed.elements });
-    setTimeout(() => { isRemoteUpdatingRef.current = false; }, 50);
+    setTimeout(() => { isRemoteUpdatingRef.current = false; }, 60);
   };
 
-  // ---------------- 3. 标准化三参数 onChange ----------------
-  const handleOnChange = (elements, appState, files) => {
-    if (!currentBoard) return;
-    if (isRemoteUpdatingRef.current) return;
+  // ---------------- 3. 极致性能优化的标准 onChange ----------------
+  const handleOnChange = (elements, appState) => {
+    if (!currentBoard || isRemoteUpdatingRef.current) return;
+
+    // 🟢 核心优化：如果正在画笔书写或正在拖拽元素，本地丝滑渲染，拦截写库行为
+    if (appState.isDragging || appState.activeTool.type === "freedraw") {
+      return; 
+    }
 
     const now = Date.now();
-    const THROTTLE_INTERVAL = 300; 
+    const THROTTLE_INTERVAL = 400; // 适当拉长节流保护
 
     clearTimeout(saveTimer.current);
 
     const executeDBSave = async () => {
+      // 再次双重确保状态安全
+      if (isRemoteUpdatingRef.current) return;
+
       versionRef.current += 1; 
       setIsSaving(true);
 
@@ -239,16 +184,14 @@ export default function App() {
 
       await supabase
         .from("whiteboards")
-        .update({ 
-          content: wrappedPayload, 
-          updated_at: new Date().toISOString() 
-        })
+        .update({ content: wrappedPayload, updated_at: new Date().toISOString() })
         .eq("id", currentBoard.id);
 
       setIsSaving(false);
       lastSaveTimeRef.current = Date.now();
     };
 
+    // 🟢 智能混合策略：非拖拽状态下，高频操作用节流，最后松手一刻用防抖兜底
     if (now - lastSaveTimeRef.current >= THROTTLE_INTERVAL) {
       executeDBSave();
     } else {
@@ -256,35 +199,35 @@ export default function App() {
     }
   };
 
-  // 🟢 实时指针轨迹广播
+  // ---------------- 4. 限制频率的指针 Broadcast ----------------
   const handlePointerUpdate = (payload) => {
-    // 🟢 修复：只有在通道真正建立完毕（isChannelReadyRef 为 true）时才发送，断绝 REST 降级警告
-    if (channelRef.current && isChannelReadyRef.current) {
-      channelRef.current.send({
-        type: "broadcast",
-        event: "pointer_update",
-        payload: {
-          userId: userInfo.id,
-          name: userInfo.name,
-          pointer: payload.pointer,
-          button: payload.button,
-          selectedElementIds: payload.selectedElementIds
-        }
-      });
-    }
+    if (!channelRef.current || !isChannelReadyRef.current) return;
+
+    const now = Date.now();
+    // 🟢 核心优化：强制限制光标发送频率（每 50ms 最多允许发一次）
+    if (now - lastPointerSendTimeRef.current < 50) return; 
+
+    lastPointerSendTimeRef.current = now;
+
+    channelRef.current.send({
+      type: "broadcast",
+      event: "pointer_update",
+      payload: {
+        userId: userInfo.id,
+        name: userInfo.name,
+        pointer: payload.pointer,
+        button: payload.button,
+        selectedElementIds: payload.selectedElementIds
+      }
+    });
   };
 
-  // ---------------- 4. 业务数据操作 ----------------
+  // ---------------- 5. 业务操作与样式 ----------------
   const handleCreateBoard = async () => {
     if (!userInfo.isLoggedIn) return alert("请先登录");
     const title = prompt("请输入新白板名称");
     if (!title) return;
-    const { data } = await supabase
-      .from("whiteboards")
-      .insert([{ title, owner: userInfo.name, content: [], is_public: false }])
-      .select()
-      .single();
-    
+    const { data } = await supabase.from("whiteboards").insert([{ title, owner: userInfo.name, content: [], is_public: false }]).select().single();
     setPrivateBoards(prev => [data, ...prev]);
     setCurrentBoard(data);
   };
@@ -292,13 +235,7 @@ export default function App() {
   const handleTogglePublish = async (board, e) => {
     e.stopPropagation();
     if (!userInfo.isLoggedIn || board.owner !== userInfo.name) return alert("无权操作");
-    const { data } = await supabase
-      .from("whiteboards")
-      .update({ is_public: !board.is_public })
-      .eq("id", board.id)
-      .select()
-      .single();
-      
+    const { data } = await supabase.from("whiteboards").update({ is_public: !board.is_public }).eq("id", board.id).select().single();
     await fetchBoards();
     if (currentBoard?.id === board.id) setCurrentBoard(data);
   };
@@ -312,7 +249,6 @@ export default function App() {
     await fetchBoards();
   };
 
-  // ---------------- 5. 动态布局样式 ----------------
   const layoutStyles = {
     container: { display: "flex", height: "100vh", width: "100vw", backgroundColor: "#f8f9fa", padding: isSidebarOpen ? "14px" : "0px", gap: isSidebarOpen ? "14px" : "0px", boxSizing: "border-box", overflow: "hidden" },
     sidebar: { width: isSidebarOpen ? "280px" : "0px", opacity: isSidebarOpen ? 1 : 0, padding: isSidebarOpen ? "20px 16px" : "0px", background: "#ffffff", borderRadius: "16px", display: "flex", flexDirection: "column", boxShadow: "0 4px 12px rgba(0,0,0,0.03)", overflow: "hidden", whiteSpace: "nowrap" },
@@ -321,8 +257,6 @@ export default function App() {
 
   return (
     <div className="sidebar-transition" style={layoutStyles.container}>
-      
-      {/* 左侧栏 */}
       <div className="sidebar-transition" style={layoutStyles.sidebar}>
         <div style={styles.userInfoCard}>
           <div style={styles.avatar}>{userInfo.name.charAt(0)}</div>
@@ -373,7 +307,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* 画布右侧主区 */}
       <div className="sidebar-transition" style={layoutStyles.main}>
         <div style={{ position: "absolute", top: 16, left: 16, zIndex: 10, display: "flex", gap: "12px", alignItems: "center" }}>
           <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} style={styles.toggleSidebarBtn}>
@@ -398,7 +331,6 @@ export default function App() {
           />
         </div>
       </div>
-
     </div>
   );
 }
