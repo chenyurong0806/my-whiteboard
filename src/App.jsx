@@ -47,21 +47,21 @@ export default function App() {
 
   const lastAppliedTimestampRef = useRef(0);
   const isRemoteUpdatingRef = useRef(false);
-  const lastSaveTimeRef = useRef(0);
   const lastPointerSendTimeRef = useRef(0);
 
+  // 协作者数据：除了 Excalidraw 需要的字段，额外存储 targetPointer / displayPointer 用于平滑插值
   const collaboratorsRef = useRef(new Map());
   const isChannelReadyRef = useRef(false);
 
   const isSavingRef = useRef(false);
   const pendingSaveElementsRef = useRef(null);
 
-  // 新增：本地脏标志和最近元素引用
+  // 本地脏标志 & 最近元素（修复新用户加入清空问题）
   const hasUnsavedChangesRef = useRef(false);
   const latestElementsRef = useRef(null);
 
-  // 新增：用于合并光标更新的 requestAnimationFrame 锁
-  const updatePendingRef = useRef(false);
+  // 平滑动画帧 ID
+  const animationFrameIdRef = useRef(null);
 
   useEffect(() => { injectCSS(); }, []);
 
@@ -93,9 +93,15 @@ export default function App() {
   useEffect(() => {
     if (!currentBoard?.id || !userInfo.id) return;
 
+    // 清理上一次的连接
     isChannelReadyRef.current = false;
     collaboratorsRef.current.clear();
     if (channelRef.current) supabase.removeChannel(channelRef.current);
+    // 取消正在进行的动画帧
+    if (animationFrameIdRef.current) {
+      cancelAnimationFrame(animationFrameIdRef.current);
+      animationFrameIdRef.current = null;
+    }
 
     const channel = supabase.channel(`board_${currentBoard.id}`);
     channelRef.current = channel;
@@ -116,7 +122,7 @@ export default function App() {
           const remoteUpdatedAt = new Date(payload.new.updated_at).getTime();
           if (remoteUpdatedAt <= lastAppliedTimestampRef.current) return;
 
-          // 关键修复：如果本地有未保存的改动，暂时忽略远程更新，等保存后再接受
+          // 本地有未保存的更改时忽略远程更新，避免回弹
           if (hasUnsavedChangesRef.current) return;
 
           lastAppliedTimestampRef.current = remoteUpdatedAt;
@@ -126,6 +132,9 @@ export default function App() {
             commitToHistory: false,
           });
 
+          // 同步最新元素引用，防止本地误判
+          latestElementsRef.current = remoteContent.elements;
+
           setTimeout(() => {
             isRemoteUpdatingRef.current = false;
           }, 60);
@@ -134,14 +143,29 @@ export default function App() {
       .on("broadcast", { event: "pointer_update" }, ({ payload }) => {
         if (payload.userId === userInfo.id || !excalidrawAPIRef.current) return;
 
+        const existing = collaboratorsRef.current.get(payload.userId) || {};
+        const now = Date.now();
+
+        // 更新目标指针坐标
+        const targetPointer = {
+          x: payload.pointer.x,
+          y: payload.pointer.y,
+        };
+
+        // 如果没有 displayPointer（新用户），初始化为目标位置
+        const displayPointer = existing.displayPointer || targetPointer;
+
         collaboratorsRef.current.set(payload.userId, {
-          pointer: payload.pointer,
+          ...existing,
+          targetPointer,
+          displayPointer,
           button: payload.button || "up",
           username: payload.name,
           selectedElementIds: payload.selectedElementIds || {},
+          lastUpdate: now,
         });
 
-        // 关键修复：传入新的 Map 引用，触发 Excalidraw 内部重新渲染
+        // 启动平滑动画循环
         scheduleCollaboratorsUpdate();
       })
       .on("presence", { event: "sync" }, () => {
@@ -171,28 +195,95 @@ export default function App() {
     return () => {
       isChannelReadyRef.current = false;
       supabase.removeChannel(channel);
+      if (animationFrameIdRef.current) {
+        cancelAnimationFrame(animationFrameIdRef.current);
+        animationFrameIdRef.current = null;
+      }
     };
   }, [currentBoard?.id, userInfo.id]);
 
-  // 合并光标更新的 requestAnimationFrame 调度器
+  // 持续的 requestAnimationFrame 动画循环，用于平滑移动协作者光标
   const scheduleCollaboratorsUpdate = useCallback(() => {
-    if (updatePendingRef.current || !excalidrawAPIRef.current) return;
-    updatePendingRef.current = true;
-    requestAnimationFrame(() => {
-      excalidrawAPIRef.current?.updateScene({
-        collaborators: new Map(collaboratorsRef.current),
-      });
-      updatePendingRef.current = false;
+    if (animationFrameIdRef.current) return; // 已有一个待处理的帧
+    animationFrameIdRef.current = requestAnimationFrame(() => {
+      animationFrameIdRef.current = null;
+      const hasActiveTweens = interpolateCollaborators();
+      if (hasActiveTweens) {
+        // 仍有指针未到达目标，继续下一帧
+        scheduleCollaboratorsUpdate();
+      }
     });
   }, []);
+
+  // 对每个协作者进行线性插值，并构建渲染用的 Map
+  const interpolateCollaborators = () => {
+    if (!excalidrawAPIRef.current) return false;
+
+    let anyMoving = false;
+    const renderMap = new Map();
+
+    for (const [userId, data] of collaboratorsRef.current.entries()) {
+      const { displayPointer, targetPointer, button, username, selectedElementIds } = data;
+      if (!displayPointer || !targetPointer) {
+        // 数据不完整，直接使用现有指针
+        if (data.pointer) {
+          renderMap.set(userId, {
+            pointer: data.pointer,
+            button: button || "up",
+            username,
+            selectedElementIds: selectedElementIds || {},
+          });
+        }
+        continue;
+      }
+
+      const dx = targetPointer.x - displayPointer.x;
+      const dy = targetPointer.y - displayPointer.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      if (distance < 0.5) {
+        // 吸附到目标
+        data.displayPointer = { ...targetPointer };
+      } else {
+        // 缓动因子 0.3，靠近目标
+        data.displayPointer = {
+          x: displayPointer.x + dx * 0.3,
+          y: displayPointer.y + dy * 0.3,
+        };
+        anyMoving = true;
+      }
+
+      // 构建渲染用的数据（使用平滑后的 displayPointer）
+      renderMap.set(userId, {
+        pointer: data.displayPointer,
+        button: button || "up",
+        username,
+        selectedElementIds: selectedElementIds || {},
+      });
+    }
+
+    excalidrawAPIRef.current.updateScene({
+      collaborators: renderMap,
+    });
+
+    return anyMoving;
+  };
 
   const loadBoardToCanvas = (board) => {
     if (!excalidrawAPIRef.current || !board) return;
     const parsed = parseContent(board.content);
+    const elements = parsed.elements;
+
     lastAppliedTimestampRef.current = new Date(board.updated_at).getTime();
-    hasUnsavedChangesRef.current = false; // 加载新白板时清除脏标志
+
+    // 清除上一次可能遗留的防抖保存
+    clearTimeout(saveTimer.current);
+    hasUnsavedChangesRef.current = false;
+    // 关键修复：同步 latestElementsRef 为当前加载的元素，防止后续 onChange 误判空内容
+    latestElementsRef.current = elements;
+
     isRemoteUpdatingRef.current = true;
-    excalidrawAPIRef.current.updateScene({ elements: parsed.elements });
+    excalidrawAPIRef.current.updateScene({ elements });
     setTimeout(() => {
       isRemoteUpdatingRef.current = false;
     }, 60);
@@ -223,14 +314,12 @@ export default function App() {
           new Date(data.updated_at).getTime()
         );
       }
-      // 保存成功，清除脏标志
       hasUnsavedChangesRef.current = false;
     } catch (e) {
       console.error("保存失败", e);
     } finally {
       isSavingRef.current = false;
       setIsSaving(false);
-      lastSaveTimeRef.current = Date.now();
 
       if (pendingSaveElementsRef.current) {
         const pending = pendingSaveElementsRef.current;
@@ -240,11 +329,10 @@ export default function App() {
     }
   };
 
-  // 修改为防抖保存，停止操作 800ms 后才触发
-  const handleOnChange = (elements, appState) => {
+  const handleOnChange = (elements) => {
     if (!currentBoard || isRemoteUpdatingRef.current) return;
 
-    // 如果元素内容没有真正变化，直接忽略
+    // 防止因为空内容或初始状态覆盖已有数据
     if (latestElementsRef.current && JSON.stringify(elements) === JSON.stringify(latestElementsRef.current)) {
       return;
     }
@@ -252,7 +340,6 @@ export default function App() {
     latestElementsRef.current = elements;
     hasUnsavedChangesRef.current = true;
 
-    // 清除之前的定时器，重新计时
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       if (isSavingRef.current) {
