@@ -203,8 +203,17 @@ export default function App() {
         }
       });
 
-    loadBoardToCanvas(currentBoard);
     return () => {
+      // ✅ 先尝试保存当前白板未保存的更改
+      if (
+        hasUnsavedChangesRef.current &&
+        currentBoard &&
+        latestElementsRef.current
+      ) {
+        // 不等待结果，直接发起保存（这里 currentBoard 还是旧的白板）
+        executeDBSave(latestElementsRef.current);
+      }
+
       isChannelReadyRef.current = false;
       supabase.removeChannel(channel);
       clearTimeout(saveTimer.current);
@@ -323,6 +332,14 @@ export default function App() {
   const executeDBSave = async (elements) => {
     if (!currentBoard || isRemoteUpdatingRef.current || !excalidrawAPIRef.current) return;
 
+    // ✅ 权限检查：私有白板只有所有者才能保存
+    if (!currentBoard.is_public && currentBoard.owner !== userInfo.name) {
+      console.warn("⛔ 你没有权限修改此私有白板");
+      hasUnsavedChangesRef.current = false;      // 避免反复尝试保存
+      pendingRemoteUpdateRef.current = null;     // 丢弃暂存的远程更新
+      return;
+    }
+    
     isSavingRef.current = true;
     setIsSaving(true);
 
