@@ -91,22 +91,29 @@ export default function App() {
     initUser();
   }, []);
 
-  // 💡 修改：允许接收一个名字参数
   const fetchBoards = async (currentNameOverride) => {
+    const activeUsername = currentNameOverride || userInfo.name;
+    
+    // 💡 修复 1：使用 .or() 语法，只查询公开的、或者主人是自己的白板
     const { data, error } = await supabase
       .from("whiteboards")
       .select("*")
+      .or(`is_public.eq.true,owner.eq."${activeUsername}"`) // 👈 核心安全锁
       .order("updated_at", { ascending: false });
 
     if (error) return console.error("获取白板失败:", error);
 
-    // 💡 修复：如果传了新名字就用新名字，否则用状态里的名字
-    const activeUsername = currentNameOverride || userInfo.name;
+    const publicList = data.filter((b) => b.is_public);
+    const privateList = data.filter((b) => b.owner === activeUsername && !b.is_public);
 
-    setPublicBoards(data.filter((b) => b.is_public));
-    setPrivateBoards(data.filter((b) => b.owner === activeUsername && !b.is_public)); // 👈 使用正确的名字过滤
+    setPublicBoards(publicList);
+    setPrivateBoards(privateList);
 
-    if (!currentBoard && data.length > 0) setCurrentBoard(data[0]);
+    // 💡 修复 2：调整默认选中逻辑，优先进入自己的私密白板，没有再进入公共白板
+    if (!currentBoard) {
+      const defaultBoard = privateList.length > 0 ? privateList[0] : (publicList.length > 0 ? publicList[0] : null);
+      setCurrentBoard(defaultBoard);
+    }
   };
 
   useEffect(() => {
