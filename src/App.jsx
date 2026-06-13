@@ -45,18 +45,13 @@ export default function App() {
   const saveTimer = useRef(null);
   const channelRef = useRef(null);
 
-  // 使用时间戳代替版本号，消除客户端版本冲突
-  const lastAppliedTimestampRef = useRef(0);
+  // 核心节流与防抖锁
   const isRemoteUpdatingRef = useRef(false);
-  const lastSaveTimeRef = useRef(0);
   const lastPointerSendTimeRef = useRef(0);
+  const lastBroadcastTimeRef = useRef(0); // 新增：用于元素实时广播的节流
 
   const collaboratorsRef = useRef(new Map());
   const isChannelReadyRef = useRef(false);
-
-  // 保存正在进行的写入操作，避免并发保存
-  const isSavingRef = useRef(false);
-  const pendingSaveElementsRef = useRef(null);
 
   useEffect(() => { injectCSS(); }, []);
 
@@ -96,6 +91,7 @@ export default function App() {
     channelRef.current = channel;
 
     channel
+      // 1. 监听数据库持久化更新（仅作为最终兜底同步）
       .on(
         "postgres_changes",
         {
@@ -106,27 +102,29 @@ export default function App() {
         },
         (payload) => {
           const remoteContent = parseContent(payload.new.content);
-          // 忽略自己的更新
           if (remoteContent.senderId === userInfo.id) return;
 
-          const remoteUpdatedAt = new Date(payload.new.updated_at).getTime();
-          // 只接受比本地更新的版本
-          if (remoteUpdatedAt <= lastAppliedTimestampRef.current) return;
-
-          // 应用远程元素
-          lastAppliedTimestampRef.current = remoteUpdatedAt;
           isRemoteUpdatingRef.current = true;
           excalidrawAPIRef.current?.updateScene({
             elements: remoteContent.elements,
             commitToHistory: false,
           });
 
-          // 短暂锁定后释放，防止本地 onChange 触发保存
-          setTimeout(() => {
-            isRemoteUpdatingRef.current = false;
-          }, 60);
+          setTimeout(() => { isRemoteUpdatingRef.current = false; }, 60);
         }
       )
+      // 2. 🟢 监听轻量级实时画布广播（解决画笔卡顿的核心）
+      .on("broadcast", { event: "scene_update" }, ({ payload }) => {
+        if (payload.senderId === userInfo.id || !excalidrawAPIRef.current) return;
+        
+        isRemoteUpdatingRef.current = true;
+        excalidrawAPIRef.current.updateScene({
+          elements: payload.elements,
+          commitToHistory: false,
+        });
+        setTimeout(() => { isRemoteUpdatingRef.current = false; }, 50);
+      })
+      // 3. 监听鼠标指针广播
       .on("broadcast", { event: "pointer_update" }, ({ payload }) => {
         if (payload.userId === userInfo.id || !excalidrawAPIRef.current) return;
 
@@ -139,6 +137,7 @@ export default function App() {
 
         excalidrawAPIRef.current.updateScene({ collaborators: collaboratorsRef.current });
       })
+      // 4. 监听在线人数变化
       .on("presence", { event: "sync" }, () => {
         const state = channel.presenceState();
         setOnlineUsers(new Map(Object.entries(state)));
@@ -172,92 +171,56 @@ export default function App() {
   const loadBoardToCanvas = (board) => {
     if (!excalidrawAPIRef.current || !board) return;
     const parsed = parseContent(board.content);
-    lastAppliedTimestampRef.current = new Date(board.updated_at).getTime();
     isRemoteUpdatingRef.current = true;
     excalidrawAPIRef.current.updateScene({ elements: parsed.elements });
-    setTimeout(() => {
-      isRemoteUpdatingRef.current = false;
-    }, 60);
+    setTimeout(() => { isRemoteUpdatingRef.current = false; }, 60);
   };
 
-  // 实际执行数据库保存
+  // 🟢 极简、高效的数据库保存方法
   const executeDBSave = async (elements) => {
-    if (!currentBoard || isRemoteUpdatingRef.current || !excalidrawAPIRef.current) return;
+    if (!currentBoard || !excalidrawAPIRef.current) return;
 
-    isSavingRef.current = true;
     setIsSaving(true);
-
-    const wrappedPayload = {
-      elements: elements,
-      senderId: userInfo.id,
-    };
+    const wrappedPayload = { elements: elements, senderId: userInfo.id };
 
     try {
-      const { data, error } = await supabase
+      await supabase
         .from("whiteboards")
         .update({ content: wrappedPayload, updated_at: new Date().toISOString() })
-        .eq("id", currentBoard.id)
-        .select("updated_at")
-        .single();
-
-      if (!error && data?.updated_at) {
-        // 更新本地最新时间戳，防止重复应用自己的更新
-        lastAppliedTimestampRef.current = Math.max(
-          lastAppliedTimestampRef.current,
-          new Date(data.updated_at).getTime()
-        );
-      }
+        .eq("id", currentBoard.id);
     } catch (e) {
       console.error("保存失败", e);
     } finally {
-      isSavingRef.current = false;
       setIsSaving(false);
-      lastSaveTimeRef.current = Date.now();
-
-      // 如果在保存期间又有新的待保存元素，立刻执行一次保存
-      if (pendingSaveElementsRef.current) {
-        const pending = pendingSaveElementsRef.current;
-        pendingSaveElementsRef.current = null;
-        executeDBSave(pending);
-      }
     }
   };
 
-  // 优化后的 onChange：缩短节流间隔，放开绘制时的实时同步（但降低频率）
+  // 🟢 彻底重构的 onChange：读写分离策略
   const handleOnChange = (elements, appState) => {
     if (!currentBoard || isRemoteUpdatingRef.current) return;
 
-    // 决定节流间隔：画笔或拖拽时稍长（150ms），普通操作用极短间隔（80ms）
-    const isDrawing = appState.activeTool?.type === "freedraw";
-    const isDragging = appState.isDragging;
-    const throttleInterval = isDrawing || isDragging ? 150 : 80;
-
     const now = Date.now();
 
-    // 如果上一次保存距今小于间隔，则用防抖推迟保存
-    if (now - lastSaveTimeRef.current < throttleInterval) {
-      clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => {
-        // 如果正在保存，将最新元素暂存，等待保存完成后自动触发
-        if (isSavingRef.current) {
-          pendingSaveElementsRef.current = elements;
-        } else {
-          executeDBSave(elements);
-        }
-      }, throttleInterval);
-      return;
+    // 1. 实时预览层 (Broadcast) - 限制约每秒 12 帧，丝滑且不占带宽
+    if (now - lastBroadcastTimeRef.current >= 80) {
+      if (channelRef.current && isChannelReadyRef.current) {
+        channelRef.current.send({
+          type: "broadcast",
+          event: "scene_update",
+          payload: { elements, senderId: userInfo.id }
+        });
+        lastBroadcastTimeRef.current = now;
+      }
     }
 
-    // 满足间隔，立即保存
+    // 2. 数据库持久化层 (Debounce) - 绝不允许在画画时写入数据库
+    // 只有在用户完全停止绘制/拖拽 1 秒钟后，才会执行一次写入
     clearTimeout(saveTimer.current);
-    if (isSavingRef.current) {
-      pendingSaveElementsRef.current = elements;
-    } else {
+    saveTimer.current = setTimeout(() => {
       executeDBSave(elements);
-    }
+    }, 1000);
   };
 
-  // 指针广播：保持50ms频率限制
   const handlePointerUpdate = (payload) => {
     if (!channelRef.current || !isChannelReadyRef.current) return;
 
@@ -315,38 +278,9 @@ export default function App() {
   };
 
   const layoutStyles = {
-    container: {
-      display: "flex",
-      height: "100vh",
-      width: "100vw",
-      backgroundColor: "#f8f9fa",
-      padding: isSidebarOpen ? "14px" : "0px",
-      gap: isSidebarOpen ? "14px" : "0px",
-      boxSizing: "border-box",
-      overflow: "hidden",
-    },
-    sidebar: {
-      width: isSidebarOpen ? "280px" : "0px",
-      opacity: isSidebarOpen ? 1 : 0,
-      padding: isSidebarOpen ? "20px 16px" : "0px",
-      background: "#ffffff",
-      borderRadius: "16px",
-      display: "flex",
-      flexDirection: "column",
-      boxShadow: "0 4px 12px rgba(0,0,0,0.03)",
-      overflow: "hidden",
-      whiteSpace: "nowrap",
-    },
-    main: {
-      flex: 1,
-      borderRadius: isSidebarOpen ? "16px" : "0px",
-      background: "#ffffff",
-      display: "flex",
-      flexDirection: "column",
-      overflow: "hidden",
-      position: "relative",
-      boxShadow: isSidebarOpen ? "0 4px 24px rgba(0,0,0,0.06)" : "none",
-    },
+    container: { display: "flex", height: "100vh", width: "100vw", backgroundColor: "#f8f9fa", padding: isSidebarOpen ? "14px" : "0px", gap: isSidebarOpen ? "14px" : "0px", boxSizing: "border-box", overflow: "hidden" },
+    sidebar: { width: isSidebarOpen ? "280px" : "0px", opacity: isSidebarOpen ? 1 : 0, padding: isSidebarOpen ? "20px 16px" : "0px", background: "#ffffff", borderRadius: "16px", display: "flex", flexDirection: "column", boxShadow: "0 4px 12px rgba(0,0,0,0.03)", overflow: "hidden", whiteSpace: "nowrap" },
+    main: { flex: 1, borderRadius: isSidebarOpen ? "16px" : "0px", background: "#ffffff", display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", boxShadow: isSidebarOpen ? "0 4px 24px rgba(0,0,0,0.06)" : "none" },
   };
 
   return (
@@ -371,22 +305,12 @@ export default function App() {
             <div
               key={board.id}
               onClick={() => setCurrentBoard(board)}
-              style={{
-                ...styles.roomItem,
-                borderColor: currentBoard?.id === board.id ? "#1a73e8" : "#dadce0",
-              }}
+              style={{ ...styles.roomItem, borderColor: currentBoard?.id === board.id ? "#1a73e8" : "#dadce0" }}
             >
               <span style={styles.truncate}>{board.title}</span>
               <div style={styles.actions}>
-                <button onClick={(e) => handleTogglePublish(board, e)} style={styles.textBtn}>
-                  公开
-                </button>
-                <button
-                  onClick={(e) => handleDeleteBoard(board, e)}
-                  style={{ ...styles.textBtn, color: "#d93025" }}
-                >
-                  删
-                </button>
+                <button onClick={(e) => handleTogglePublish(board, e)} style={styles.textBtn}>公开</button>
+                <button onClick={(e) => handleDeleteBoard(board, e)} style={{ ...styles.textBtn, color: "#d93025" }}>删</button>
               </div>
             </div>
           ))}
@@ -396,10 +320,7 @@ export default function App() {
             <div
               key={board.id}
               onClick={() => setCurrentBoard(board)}
-              style={{
-                ...styles.roomItem,
-                borderColor: currentBoard?.id === board.id ? "#34a853" : "#dadce0",
-              }}
+              style={{ ...styles.roomItem, borderColor: currentBoard?.id === board.id ? "#34a853" : "#dadce0" }}
             >
               <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
                 <span style={styles.truncate}>{board.title}</span>
@@ -408,18 +329,8 @@ export default function App() {
               <div style={styles.actions}>
                 {board.owner === userInfo.name && (
                   <>
-                    <button
-                      onClick={(e) => handleTogglePublish(board, e)}
-                      style={{ ...styles.textBtn, color: "#f29900" }}
-                    >
-                      私有
-                    </button>
-                    <button
-                      onClick={(e) => handleDeleteBoard(board, e)}
-                      style={{ ...styles.textBtn, color: "#d93025" }}
-                    >
-                      删
-                    </button>
+                    <button onClick={(e) => handleTogglePublish(board, e)} style={{ ...styles.textBtn, color: "#f29900" }}>私有</button>
+                    <button onClick={(e) => handleDeleteBoard(board, e)} style={{ ...styles.textBtn, color: "#d93025" }}>删</button>
                   </>
                 )}
               </div>
@@ -433,17 +344,7 @@ export default function App() {
       </div>
 
       <div className="sidebar-transition" style={layoutStyles.main}>
-        <div
-          style={{
-            position: "absolute",
-            top: 16,
-            left: 16,
-            zIndex: 10,
-            display: "flex",
-            gap: "12px",
-            alignItems: "center",
-          }}
-        >
+        <div style={{ position: "absolute", top: 16, left: 16, zIndex: 10, display: "flex", gap: "12px", alignItems: "center" }}>
           <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} style={styles.toggleSidebarBtn}>
             {isSidebarOpen ? "◀" : "▶"}
           </button>
@@ -460,9 +361,7 @@ export default function App() {
 
         <div style={{ flex: 1, position: "relative" }}>
           <Excalidraw
-            excalidrawAPI={(api) => {
-              excalidrawAPIRef.current = api;
-            }}
+            excalidrawAPI={(api) => { excalidrawAPIRef.current = api; }}
             onChange={handleOnChange}
             onPointerUpdate={handlePointerUpdate}
             theme="light"
@@ -475,131 +374,21 @@ export default function App() {
 }
 
 const styles = {
-  userInfoCard: {
-    display: "flex",
-    gap: "12px",
-    alignItems: "center",
-    marginBottom: "20px",
-    paddingBottom: "16px",
-    borderBottom: "1px solid #e8eaed",
-  },
-  avatar: {
-    width: "40px",
-    height: "40px",
-    borderRadius: "50%",
-    backgroundColor: "#1a73e8",
-    color: "#fff",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    fontSize: "16px",
-    fontWeight: "bold",
-  },
+  userInfoCard: { display: "flex", gap: "12px", alignItems: "center", marginBottom: "20px", paddingBottom: "16px", borderBottom: "1px solid #e8eaed" },
+  avatar: { width: "40px", height: "40px", borderRadius: "50%", backgroundColor: "#1a73e8", color: "#fff", display: "flex", justifyContent: "center", alignItems: "center", fontSize: "16px", fontWeight: "bold" },
   userName: { fontWeight: "600", color: "#202124", fontSize: "14px" },
   userStatus: { fontSize: "11px", marginTop: "4px", fontWeight: 600 },
   scrollArea: { flex: 1, overflowY: "auto" },
-  sectionTitle: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    fontWeight: "700",
-    color: "#5f6368",
-    fontSize: "12px",
-    marginBottom: "12px",
-    letterSpacing: "0.3px",
-  },
-  roomItem: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "10px 12px",
-    borderRadius: "8px",
-    cursor: "pointer",
-    background: "#fff",
-    marginBottom: "8px",
-    border: "1px solid transparent",
-    transition: "all 0.2s",
-  },
-  truncate: {
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    fontSize: "13px",
-    color: "#3c4043",
-    fontWeight: "500",
-    maxWidth: "100px",
-  },
+  sectionTitle: { display: "flex", justifyContent: "space-between", alignItems: "center", fontWeight: "700", color: "#5f6368", fontSize: "12px", marginBottom: "12px", letterSpacing: "0.3px" },
+  roomItem: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", borderRadius: "8px", cursor: "pointer", background: "#fff", marginBottom: "8px", border: "1px solid transparent", transition: "all 0.2s" },
+  truncate: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontSize: "13px", color: "#3c4043", fontWeight: "500", maxWidth: "100px" },
   ownerTag: { fontSize: "11px", color: "#80868b", marginTop: "2px" },
   actions: { display: "flex", gap: "2px" },
-  fabBtn: {
-    borderRadius: "50%",
-    width: "24px",
-    height: "24px",
-    border: "none",
-    background: "#1a73e8",
-    color: "#fff",
-    cursor: "pointer",
-    fontSize: "16px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    boxShadow: "0 2px 4px rgba(26,115,232,0.2)",
-  },
-  textBtn: {
-    fontSize: "11px",
-    padding: "4px 6px",
-    borderRadius: "4px",
-    border: "none",
-    background: "transparent",
-    color: "#1a73e8",
-    cursor: "pointer",
-    fontWeight: "600",
-  },
-  onlineBadge: {
-    marginTop: "16px",
-    padding: "10px",
-    background: "#e6f4ea",
-    borderRadius: "8px",
-    fontSize: "12px",
-    color: "#137333",
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    fontWeight: "600",
-  },
+  fabBtn: { borderRadius: "50%", width: "24px", height: "24px", border: "none", background: "#1a73e8", color: "#fff", cursor: "pointer", fontSize: "16px", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 4px rgba(26,115,232,0.2)" },
+  textBtn: { fontSize: "11px", padding: "4px 6px", borderRadius: "4px", border: "none", background: "transparent", color: "#1a73e8", cursor: "pointer", fontWeight: "600" },
+  onlineBadge: { marginTop: "16px", padding: "10px", background: "#e6f4ea", borderRadius: "8px", fontSize: "12px", color: "#137333", display: "flex", alignItems: "center", gap: "8px", fontWeight: "600" },
   pulseDot: { width: "8px", height: "8px", backgroundColor: "#34A853", borderRadius: "50%" },
-  toggleSidebarBtn: {
-    width: "40px",
-    height: "40px",
-    borderRadius: "8px",
-    border: "none",
-    background: "#ffffff",
-    color: "#5f6368",
-    cursor: "pointer",
-    boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    fontSize: "12px",
-  },
-  floatingTitleCard: {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    padding: "0 16px",
-    height: "40px",
-    background: "#ffffff",
-    borderRadius: "8px",
-    boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
-    fontSize: "13px",
-    color: "#202124",
-  },
-  tag: {
-    fontSize: "10px",
-    padding: "2px 6px",
-    background: "#e8f0fe",
-    color: "#1a73e8",
-    borderRadius: "4px",
-    fontWeight: "600",
-  },
+  toggleSidebarBtn: { width: "40px", height: "40px", borderRadius: "8px", border: "none", background: "#ffffff", color: "#5f6368", cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.12)", display: "flex", justifyContent: "center", alignItems: "center", fontSize: "12px" },
+  floatingTitleCard: { display: "flex", alignItems: "center", gap: "8px", padding: "0 16px", height: "40px", background: "#ffffff", borderRadius: "8px", boxShadow: "0 2px 8px rgba(0,0,0,0.12)", fontSize: "13px", color: "#202124" },
+  tag: { fontSize: "10px", padding: "2px 6px", background: "#e8f0fe", color: "#1a73e8", borderRadius: "4px", fontWeight: "600" },
 };
