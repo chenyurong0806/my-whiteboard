@@ -202,7 +202,7 @@ export default function App() {
       elements,
       commitToHistory: false,
     });
-    latestElementsRef.current = elements;
+    latestElementsRef.current = structuredClone(elements);
     setTimeout(() => {
       isRemoteUpdatingRef.current = false;
     }, 60);
@@ -288,7 +288,7 @@ export default function App() {
     clearTimeout(moveEndTimer.current);
     hasUnsavedChangesRef.current = false;
     pendingRemoteUpdateRef.current = null;
-    latestElementsRef.current = elements;
+    latestElementsRef.current = structuredClone(elements);
 
     isRemoteUpdatingRef.current = true;
     excalidrawAPIRef.current.updateScene({ elements });
@@ -350,13 +350,16 @@ export default function App() {
   const handleOnChange = (elements) => {
     if (!currentBoard || isRemoteUpdatingRef.current) return;
 
+    // 这里的对比现在有效了，因为 latestElementsRef 存的是真正的历史快照
     if (latestElementsRef.current && JSON.stringify(elements) === JSON.stringify(latestElementsRef.current)) {
       return;
     }
 
-    latestElementsRef.current = elements;
+    // 💡 修复：使用 structuredClone 进行深拷贝，断开内存引用
+    latestElementsRef.current = structuredClone(elements); 
     hasUnsavedChangesRef.current = true;
 
+    // 现在这里的 clearTimeout 能够在持续拖拽时正常工作了！
     clearTimeout(moveEndTimer.current);
     moveEndTimer.current = setTimeout(() => {
       if (hasUnsavedChangesRef.current && !isSavingRef.current) {
