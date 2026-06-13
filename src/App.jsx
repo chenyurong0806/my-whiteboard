@@ -67,9 +67,13 @@ export default function App() {
   const channelRef = useRef(null);
   
   // 核心控制 Ref
-  const versionRef = useRef(0);                 // 🟢 本地版本计数器
+  const versionRef = useRef(0);                 // 本地版本计数器
   const isRemoteUpdatingRef = useRef(false);    // 远端更新状态锁
   const lastSaveTimeRef = useRef(0);            // 节流时间戳
+  
+  // 🟢 修复方案引入的 Ref
+  const collaboratorsRef = useRef(new Map());   // 独立维护的所有协作者光标 Map
+  const isChannelReadyRef = useRef(false);      // 频道 WebSocket 就绪锁
 
   useEffect(() => { injectCSS(); }, []);
 
@@ -115,14 +119,17 @@ export default function App() {
   useEffect(() => {
     if (!currentBoard?.id || !userInfo.id) return;
 
+    // 重置就绪状态和光标缓存
+    isChannelReadyRef.current = false;
+    collaboratorsRef.current.clear();
+
     if (channelRef.current) supabase.removeChannel(channelRef.current);
 
-    // 订阅当前画布频道
     const channel = supabase.channel(`board_${currentBoard.id}`);
     channelRef.current = channel;
 
     channel
-      // 🟢 A. 监听 Postgres Changes 数据表 UPDATE 变更
+      // A. 监听 Postgres Changes 数据表 UPDATE 变更
       .on(
         "postgres_changes",
         {
@@ -134,79 +141,94 @@ export default function App() {
         (payload) => {
           const remoteContent = parseContent(payload.new.content);
 
-          // 🟢 接收端 version 判断：如果是自己发的，或者版本不高于当前版本，则直接丢弃
+          // 接收端 version 判断
           if (remoteContent.senderId === userInfo.id || remoteContent.version <= versionRef.current) {
             return;
           }
 
-          // 同步远程版本号
           versionRef.current = remoteContent.version;
-
-          // 开启状态锁，阻止 updateScene 再次触发本地 onChange 发起二次保存
           isRemoteUpdatingRef.current = true;
+          
           excalidrawAPIRef.current.updateScene({
             elements: remoteContent.elements,
             commitToHistory: false
           });
           
-          // 渲染缓冲释放
           setTimeout(() => { isRemoteUpdatingRef.current = false; }, 50);
         }
       )
-      // 🟢 B. 更改后的轻量级 Broadcast Payload (专职负责指针渲染)
+      // B. 监听实时光标广播数据
       .on("broadcast", { event: "pointer_update" }, ({ payload }) => {
         if (payload.userId === userInfo.id || !excalidrawAPIRef.current) return;
         
-        const collaborators = new Map(excalidrawAPIRef.current.getCollaborators());
-        collaborators.set(payload.userId, {
+        // 🟢 修复：改用本地维护的 collaboratorsRef 写入，规避 getCollaborators 报错
+        collaboratorsRef.current.set(payload.userId, {
           pointer: payload.pointer,
           button: payload.button || "up",
           username: payload.name,
           selectedElementIds: payload.selectedElementIds || {}
         });
         
-        excalidrawAPIRef.current.updateScene({ collaborators });
+        excalidrawAPIRef.current.updateScene({ 
+          collaborators: collaboratorsRef.current 
+        });
       })
-      // C. 在线状态人数统计
+      // C. 在线状态同步与幽灵指针清理
       .on("presence", { event: "sync" }, () => {
         const state = channel.presenceState();
         setOnlineUsers(new Map(Object.entries(state)));
+        
+        // 🟢 动态清理已经离线的用户光标
+        const activeUserIds = new Set(Object.keys(state));
+        let hasChanged = false;
+        for (const userId of collaboratorsRef.current.keys()) {
+          if (!activeUserIds.has(userId)) {
+            collaboratorsRef.current.delete(userId);
+            hasChanged = true;
+          }
+        }
+        if (hasChanged && excalidrawAPIRef.current) {
+          excalidrawAPIRef.current.updateScene({ collaborators: collaboratorsRef.current });
+        }
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
+          // 🟢 修复：标记通道完全就绪，允许向外发送广播
+          isChannelReadyRef.current = true;
           await channel.track({ name: userInfo.name });
         }
       });
 
     loadBoardToCanvas(currentBoard);
 
-    return () => { supabase.removeChannel(channel); };
+    return () => { 
+      isChannelReadyRef.current = false;
+      supabase.removeChannel(channel); 
+    };
   }, [currentBoard?.id, userInfo.id]);
 
   const loadBoardToCanvas = (board) => {
     if (!excalidrawAPIRef.current || !board) return;
     const parsed = parseContent(board.content);
     
-    versionRef.current = parsed.version; // 初始化本地版本指针
+    versionRef.current = parsed.version; 
     isRemoteUpdatingRef.current = true;
     excalidrawAPIRef.current.updateScene({ elements: parsed.elements });
     setTimeout(() => { isRemoteUpdatingRef.current = false; }, 50);
   };
 
-  // ---------------- 3. 规范化的标准 onChange 处理 ----------------
+  // ---------------- 3. 标准化三参数 onChange ----------------
   const handleOnChange = (elements, appState, files) => {
     if (!currentBoard) return;
-    // 如果是远程同步引发的画布重绘，直接拦截
     if (isRemoteUpdatingRef.current) return;
 
     const now = Date.now();
-    const THROTTLE_INTERVAL = 300; // 300ms 高频流控节流阀
+    const THROTTLE_INTERVAL = 300; 
 
     clearTimeout(saveTimer.current);
 
-    // 🟢 核心归档：DB只做存档，依靠写库触发逻辑复制通知其他人
     const executeDBSave = async () => {
-      versionRef.current += 1; // 递增本地版本号
+      versionRef.current += 1; 
       setIsSaving(true);
 
       const wrappedPayload = {
@@ -230,14 +252,14 @@ export default function App() {
     if (now - lastSaveTimeRef.current >= THROTTLE_INTERVAL) {
       executeDBSave();
     } else {
-      // 尾部防抖，确保松开画笔后的最后一帧绝对不丢失
       saveTimer.current = setTimeout(executeDBSave, THROTTLE_INTERVAL);
     }
   };
 
-  // 🟢 规范后的实时指针轨迹 Broadcast 发生器
+  // 🟢 实时指针轨迹广播
   const handlePointerUpdate = (payload) => {
-    if (channelRef.current) {
+    // 🟢 修复：只有在通道真正建立完毕（isChannelReadyRef 为 true）时才发送，断绝 REST 降级警告
+    if (channelRef.current && isChannelReadyRef.current) {
       channelRef.current.send({
         type: "broadcast",
         event: "pointer_update",
@@ -290,46 +312,17 @@ export default function App() {
     await fetchBoards();
   };
 
-  // ---------------- 5. 动态画布全屏样式处理 ----------------
+  // ---------------- 5. 动态布局样式 ----------------
   const layoutStyles = {
-    container: { 
-      display: "flex", 
-      height: "100vh", 
-      width: "100vw",
-      backgroundColor: "#f8f9fa", 
-      padding: isSidebarOpen ? "14px" : "0px", // 收起时全局外边距清零
-      gap: isSidebarOpen ? "14px" : "0px",     // 收起时元素框间隙清零
-      boxSizing: "border-box", 
-      overflow: "hidden"
-    },
-    sidebar: { 
-      width: isSidebarOpen ? "280px" : "0px", 
-      opacity: isSidebarOpen ? 1 : 0,
-      padding: isSidebarOpen ? "20px 16px" : "0px",
-      background: "#ffffff", 
-      borderRadius: "16px", 
-      display: "flex", 
-      flexDirection: "column", 
-      boxShadow: "0 4px 12px rgba(0,0,0,0.03)", 
-      overflow: "hidden",
-      whiteSpace: "nowrap"
-    },
-    main: { 
-      flex: 1, 
-      borderRadius: isSidebarOpen ? "16px" : "0px", // 收起时圆角直角化，无缝拼接视口边缘
-      background: "#ffffff", 
-      display: "flex", 
-      flexDirection: "column", 
-      overflow: "hidden", 
-      position: "relative",
-      boxShadow: isSidebarOpen ? "0 4px 24px rgba(0,0,0,0.06)" : "none" 
-    }
+    container: { display: "flex", height: "100vh", width: "100vw", backgroundColor: "#f8f9fa", padding: isSidebarOpen ? "14px" : "0px", gap: isSidebarOpen ? "14px" : "0px", boxSizing: "border-box", overflow: "hidden" },
+    sidebar: { width: isSidebarOpen ? "280px" : "0px", opacity: isSidebarOpen ? 1 : 0, padding: isSidebarOpen ? "20px 16px" : "0px", background: "#ffffff", borderRadius: "16px", display: "flex", flexDirection: "column", boxShadow: "0 4px 12px rgba(0,0,0,0.03)", overflow: "hidden", whiteSpace: "nowrap" },
+    main: { flex: 1, borderRadius: isSidebarOpen ? "16px" : "0px", background: "#ffffff", display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", boxShadow: isSidebarOpen ? "0 4px 24px rgba(0,0,0,0.06)" : "none" }
   };
 
   return (
     <div className="sidebar-transition" style={layoutStyles.container}>
       
-      {/* 左侧抽屉栏 */}
+      {/* 左侧栏 */}
       <div className="sidebar-transition" style={layoutStyles.sidebar}>
         <div style={styles.userInfoCard}>
           <div style={styles.avatar}>{userInfo.name.charAt(0)}</div>
@@ -380,19 +373,12 @@ export default function App() {
         </div>
       </div>
 
-      {/* 沉浸式全屏画布区域 */}
+      {/* 画布右侧主区 */}
       <div className="sidebar-transition" style={layoutStyles.main}>
-        
-        {/* 控制浮层 */}
         <div style={{ position: "absolute", top: 16, left: 16, zIndex: 10, display: "flex", gap: "12px", alignItems: "center" }}>
-          <button 
-            onClick={() => setIsSidebarOpen(!isSidebarOpen)} 
-            style={styles.toggleSidebarBtn}
-            title={isSidebarOpen ? "收起左栏全屏" : "展开左栏面板"}
-          >
+          <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} style={styles.toggleSidebarBtn}>
             {isSidebarOpen ? "◀" : "▶"}
           </button>
-          
           <div style={styles.floatingTitleCard}>
             <span style={{ fontWeight: 600 }}>{currentBoard?.title || "未选择白板"}</span>
             {currentBoard && <span style={styles.tag}>{currentBoard.is_public ? "公共" : "私密"}</span>}
@@ -417,7 +403,6 @@ export default function App() {
   );
 }
 
-// ---------------- 样式字典 ----------------
 const styles = {
   userInfoCard: { display: "flex", gap: "12px", alignItems: "center", marginBottom: "20px", paddingBottom: "16px", borderBottom: "1px solid #e8eaed" },
   avatar: { width: "40px", height: "40px", borderRadius: "50%", backgroundColor: "#1a73e8", color: "#fff", display: "flex", justifyContent: "center", alignItems: "center", fontSize: "16px", fontWeight: "bold" },
