@@ -44,8 +44,8 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   const excalidrawAPIRef = useRef(null);
-  const saveTimer = useRef(null);          // 800ms 兜底防抖
-  const moveEndTimer = useRef(null);       // 300ms 操作结束检测
+  const saveTimer = useRef(null);
+  const moveEndTimer = useRef(null);
   const channelRef = useRef(null);
 
   const lastAppliedTimestampRef = useRef(0);
@@ -60,6 +60,9 @@ export default function App() {
 
   const hasUnsavedChangesRef = useRef(false);
   const latestElementsRef = useRef(null);
+
+  // 缓存被忽略的远程更新（当本地有未保存更改时）
+  const pendingRemoteUpdateRef = useRef(null);
 
   const animationFrameIdRef = useRef(null);
 
@@ -93,7 +96,6 @@ export default function App() {
   useEffect(() => {
     if (!currentBoard?.id || !userInfo.id) return;
 
-    // 清理上一次状态
     isChannelReadyRef.current = false;
     collaboratorsRef.current.clear();
     if (channelRef.current) supabase.removeChannel(channelRef.current);
@@ -123,22 +125,13 @@ export default function App() {
           const remoteUpdatedAt = new Date(payload.new.updated_at).getTime();
           if (remoteUpdatedAt <= lastAppliedTimestampRef.current) return;
 
-          // 本地有未保存的更改时忽略远程更新，避免回弹
-          if (hasUnsavedChangesRef.current) return;
+          // 如果本地有未保存的更改，先缓存这次远程更新，等保存完成后再应用
+          if (hasUnsavedChangesRef.current) {
+            pendingRemoteUpdateRef.current = { elements: remoteContent.elements, updatedAt: remoteUpdatedAt };
+            return;
+          }
 
-          lastAppliedTimestampRef.current = remoteUpdatedAt;
-          isRemoteUpdatingRef.current = true;
-          excalidrawAPIRef.current?.updateScene({
-            elements: remoteContent.elements,
-            commitToHistory: false,
-          });
-
-          // 同步最新元素引用，防止本地误判
-          latestElementsRef.current = remoteContent.elements;
-
-          setTimeout(() => {
-            isRemoteUpdatingRef.current = false;
-          }, 60);
+          applyRemoteUpdate(remoteContent.elements, remoteUpdatedAt);
         }
       )
       .on("broadcast", { event: "pointer_update" }, ({ payload }) => {
@@ -152,7 +145,6 @@ export default function App() {
           y: payload.pointer.y,
         };
 
-        // 初始化显示指针
         if (!existing.displayPointer) {
           existing.displayPointer = { ...targetPointer };
         }
@@ -160,11 +152,9 @@ export default function App() {
         existing.button = payload.button || "up";
         existing.username = payload.name;
         existing.selectedElementIds = payload.selectedElementIds || {};
-        existing.lastFrameTime = existing.lastFrameTime || now; // 保留上一帧时间
+        existing.lastFrameTime = existing.lastFrameTime || now;
 
         collaboratorsRef.current.set(payload.userId, existing);
-
-        // 启动平滑动画循环
         scheduleCollaboratorsUpdate();
       })
       .on("presence", { event: "sync" }, () => {
@@ -203,6 +193,21 @@ export default function App() {
     };
   }, [currentBoard?.id, userInfo.id]);
 
+  // 应用远程更新（被复用的逻辑）
+  const applyRemoteUpdate = (elements, updatedAt) => {
+    if (!excalidrawAPIRef.current) return;
+    lastAppliedTimestampRef.current = updatedAt;
+    isRemoteUpdatingRef.current = true;
+    excalidrawAPIRef.current.updateScene({
+      elements,
+      commitToHistory: false,
+    });
+    latestElementsRef.current = elements;
+    setTimeout(() => {
+      isRemoteUpdatingRef.current = false;
+    }, 60);
+  };
+
   const scheduleCollaboratorsUpdate = useCallback(() => {
     if (animationFrameIdRef.current) return;
     animationFrameIdRef.current = requestAnimationFrame(() => {
@@ -214,7 +219,6 @@ export default function App() {
     });
   }, []);
 
-  // 基于时间的恒速插值算法
   const interpolateCollaborators = () => {
     if (!excalidrawAPIRef.current) return false;
 
@@ -225,7 +229,6 @@ export default function App() {
     for (const [userId, data] of collaboratorsRef.current.entries()) {
       const { displayPointer, targetPointer, button, username, selectedElementIds, lastFrameTime } = data;
       if (!displayPointer || !targetPointer) {
-        // 数据不全，直接使用 pointer（兼容旧数据）
         if (data.pointer) {
           renderMap.set(userId, {
             pointer: data.pointer,
@@ -237,13 +240,12 @@ export default function App() {
         continue;
       }
 
-      const dt = lastFrameTime ? (now - lastFrameTime) / 1000 : 0.016; // 默认 16ms
+      const dt = lastFrameTime ? (now - lastFrameTime) / 1000 : 0.016;
       const dx = targetPointer.x - displayPointer.x;
       const dy = targetPointer.y - displayPointer.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
 
       if (distance < 0.5) {
-        // 吸附到目标
         data.displayPointer = { ...targetPointer };
       } else {
         const step = CURSOR_SPEED * dt;
@@ -258,7 +260,7 @@ export default function App() {
         }
       }
 
-      data.lastFrameTime = now; // 更新帧时间
+      data.lastFrameTime = now;
 
       renderMap.set(userId, {
         pointer: data.displayPointer,
@@ -285,6 +287,7 @@ export default function App() {
     clearTimeout(saveTimer.current);
     clearTimeout(moveEndTimer.current);
     hasUnsavedChangesRef.current = false;
+    pendingRemoteUpdateRef.current = null;
     latestElementsRef.current = elements;
 
     isRemoteUpdatingRef.current = true;
@@ -320,6 +323,16 @@ export default function App() {
         );
       }
       hasUnsavedChangesRef.current = false;
+
+      // 保存成功，检查是否有被暂存的远程更新需要应用
+      if (pendingRemoteUpdateRef.current) {
+        const pending = pendingRemoteUpdateRef.current;
+        pendingRemoteUpdateRef.current = null;
+        // 再次确认时间戳，防止应用旧数据
+        if (pending.updatedAt > lastAppliedTimestampRef.current) {
+          applyRemoteUpdate(pending.elements, pending.updatedAt);
+        }
+      }
     } catch (e) {
       console.error("保存失败", e);
     } finally {
@@ -337,7 +350,6 @@ export default function App() {
   const handleOnChange = (elements) => {
     if (!currentBoard || isRemoteUpdatingRef.current) return;
 
-    // 内容未变直接跳过
     if (latestElementsRef.current && JSON.stringify(elements) === JSON.stringify(latestElementsRef.current)) {
       return;
     }
@@ -345,17 +357,14 @@ export default function App() {
     latestElementsRef.current = elements;
     hasUnsavedChangesRef.current = true;
 
-    // 重置移动结束定时器：300ms 内无新变化即认为操作结束
     clearTimeout(moveEndTimer.current);
     moveEndTimer.current = setTimeout(() => {
-      // 结束时如果仍处于脏状态，立即保存
       if (hasUnsavedChangesRef.current && !isSavingRef.current) {
-        clearTimeout(saveTimer.current); // 取消兜底防抖
+        clearTimeout(saveTimer.current);
         executeDBSave(elements);
       }
     }, 300);
 
-    // 设置 800ms 兜底防抖（在持续编辑时最终也会保存）
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       if (isSavingRef.current) {
@@ -370,8 +379,7 @@ export default function App() {
     if (!channelRef.current || !isChannelReadyRef.current) return;
 
     const now = Date.now();
-    // 提高广播频率至 20ms，让远程光标更跟手
-    if (now - lastPointerSendTimeRef.current < 20) return;
+    if (now - lastPointerSendTimeRef.current < 40) return;
 
     lastPointerSendTimeRef.current = now;
 
