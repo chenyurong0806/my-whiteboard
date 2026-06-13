@@ -57,9 +57,8 @@ export default function App() {
   const pendingSaveElementsRef = useRef(null);
 
   // ---------- 平滑指针动画 ----------
-  const animationsRef = useRef(new Map()); // userId -> { frameId, displayX, displayY, targetX, targetY }
+  const animationsRef = useRef(new Map()); // userId -> { frameId, displayX, displayY, targetX, targetY, button, selectedElementIds }
 
-  // 清理单个用户的动画
   const cancelPointerAnimation = (userId) => {
     const anim = animationsRef.current.get(userId);
     if (anim?.frameId) {
@@ -68,32 +67,36 @@ export default function App() {
     animationsRef.current.delete(userId);
   };
 
-  // 驱动动画的循环
+  // 动画主循环
   const animatePointer = (userId) => {
     const anim = animationsRef.current.get(userId);
     if (!anim) return;
 
-    const LERP_SPEED = 0.35; // 越接近1越快，0.35 平滑且无抖动
     const dx = anim.targetX - anim.displayX;
     const dy = anim.targetY - anim.displayY;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
-    // 距离非常小时直接到位并停止动画
-    if (dist < 0.3) {
+    // 距离极小，直接到位并停止
+    if (dist < 0.2) {
       anim.displayX = anim.targetX;
       anim.displayY = anim.targetY;
-      animationsRef.current.set(userId, { ...anim, frameId: null });
-      // 最后一次更新场景
+      anim.frameId = null;
+      animationsRef.current.set(userId, anim);
       updateRemoteCollaborator(userId, anim.displayX, anim.displayY, anim.button, anim.selectedElementIds);
       return;
     }
 
-    // 否则进行插值
-    anim.displayX += dx * LERP_SPEED;
-    anim.displayY += dy * LERP_SPEED;
+    // 动态插值速度：距离越远越快，但上限 0.7，避免抖动
+    let speed = 0.5;
+    if (dist > 50) speed = 0.7;
+    else if (dist > 20) speed = 0.6;
+    else speed = 0.5;
+
+    anim.displayX += dx * speed;
+    anim.displayY += dy * speed;
+
     updateRemoteCollaborator(userId, anim.displayX, anim.displayY, anim.button, anim.selectedElementIds);
 
-    // 继续下一帧
     anim.frameId = requestAnimationFrame(() => animatePointer(userId));
     animationsRef.current.set(userId, anim);
   };
@@ -110,11 +113,11 @@ export default function App() {
     excalidrawAPIRef.current?.updateScene({ collaborators: collaboratorsRef.current });
   };
 
-  // 收到远程指针更新时调用
+  // 收到远程指针广播
   const handleRemotePointerUpdate = (payload) => {
     if (payload.userId === userInfo.id || !excalidrawAPIRef.current) return;
 
-    // 首次出现该用户时创建基础 collaborators 条目
+    // 首次出现该用户时初始化
     if (!collaboratorsRef.current.has(payload.userId)) {
       collaboratorsRef.current.set(payload.userId, {
         pointer: payload.pointer,
@@ -122,7 +125,6 @@ export default function App() {
         username: payload.name,
         selectedElementIds: payload.selectedElementIds || {},
       });
-      // 直接初始化动画状态
       animationsRef.current.set(payload.userId, {
         displayX: payload.pointer.x,
         displayY: payload.pointer.y,
@@ -136,7 +138,6 @@ export default function App() {
       return;
     }
 
-    // 更新目标位置
     let anim = animationsRef.current.get(payload.userId);
     if (!anim) {
       anim = {
@@ -156,14 +157,13 @@ export default function App() {
       anim.selectedElementIds = payload.selectedElementIds || anim.selectedElementIds;
     }
 
-    // 如果没有正在运行的动画则启动
+    // 如果动画未运行，启动
     if (!anim.frameId) {
       anim.frameId = requestAnimationFrame(() => animatePointer(payload.userId));
       animationsRef.current.set(payload.userId, anim);
     }
   };
 
-  // 用户离开时清理动画
   const removeRemoteUser = (userId) => {
     cancelPointerAnimation(userId);
     collaboratorsRef.current.delete(userId);
@@ -202,7 +202,7 @@ export default function App() {
 
     isChannelReadyRef.current = false;
     collaboratorsRef.current.clear();
-    // 清除所有遗留动画
+    // 清理所有动画
     animationsRef.current.forEach((anim) => cancelAnimationFrame(anim.frameId));
     animationsRef.current.clear();
 
@@ -247,7 +247,6 @@ export default function App() {
         setOnlineUsers(new Map(Object.entries(state)));
 
         const activeUserIds = new Set(Object.keys(state));
-        // 清理已经离开的用户的动画
         for (const userId of animationsRef.current.keys()) {
           if (!activeUserIds.has(userId)) {
             removeRemoteUser(userId);
@@ -258,6 +257,8 @@ export default function App() {
         if (status === "SUBSCRIBED") {
           isChannelReadyRef.current = true;
           await channel.track({ name: userInfo.name });
+        } else {
+          isChannelReadyRef.current = false;
         }
       });
 
@@ -351,12 +352,14 @@ export default function App() {
     }
   };
 
-  // 指针广播频率调整为 33ms（约30fps），比原来的50ms更平滑
+  // 优化后的指针发送：严格检查通道状态，避免 REST 回退
   const handlePointerUpdate = (payload) => {
     if (!channelRef.current || !isChannelReadyRef.current) return;
+    // 关键检查：仅当通道处于 'joined' 状态时才发送广播
+    if (channelRef.current.state !== 'joined') return;
 
     const now = Date.now();
-    if (now - lastPointerSendTimeRef.current < 33) return;
+    if (now - lastPointerSendTimeRef.current < 25) return; // 25ms ≈ 40fps
 
     lastPointerSendTimeRef.current = now;
 
