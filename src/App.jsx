@@ -45,7 +45,6 @@ export default function App() {
   const saveTimer = useRef(null);
   const channelRef = useRef(null);
 
-  // 使用时间戳代替版本号，消除客户端版本冲突
   const lastAppliedTimestampRef = useRef(0);
   const isRemoteUpdatingRef = useRef(false);
   const lastSaveTimeRef = useRef(0);
@@ -54,9 +53,122 @@ export default function App() {
   const collaboratorsRef = useRef(new Map());
   const isChannelReadyRef = useRef(false);
 
-  // 保存正在进行的写入操作，避免并发保存
   const isSavingRef = useRef(false);
   const pendingSaveElementsRef = useRef(null);
+
+  // ---------- 平滑指针动画 ----------
+  const animationsRef = useRef(new Map()); // userId -> { frameId, displayX, displayY, targetX, targetY }
+
+  // 清理单个用户的动画
+  const cancelPointerAnimation = (userId) => {
+    const anim = animationsRef.current.get(userId);
+    if (anim?.frameId) {
+      cancelAnimationFrame(anim.frameId);
+    }
+    animationsRef.current.delete(userId);
+  };
+
+  // 驱动动画的循环
+  const animatePointer = (userId) => {
+    const anim = animationsRef.current.get(userId);
+    if (!anim) return;
+
+    const LERP_SPEED = 0.35; // 越接近1越快，0.35 平滑且无抖动
+    const dx = anim.targetX - anim.displayX;
+    const dy = anim.targetY - anim.displayY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    // 距离非常小时直接到位并停止动画
+    if (dist < 0.3) {
+      anim.displayX = anim.targetX;
+      anim.displayY = anim.targetY;
+      animationsRef.current.set(userId, { ...anim, frameId: null });
+      // 最后一次更新场景
+      updateRemoteCollaborator(userId, anim.displayX, anim.displayY, anim.button, anim.selectedElementIds);
+      return;
+    }
+
+    // 否则进行插值
+    anim.displayX += dx * LERP_SPEED;
+    anim.displayY += dy * LERP_SPEED;
+    updateRemoteCollaborator(userId, anim.displayX, anim.displayY, anim.button, anim.selectedElementIds);
+
+    // 继续下一帧
+    anim.frameId = requestAnimationFrame(() => animatePointer(userId));
+    animationsRef.current.set(userId, anim);
+  };
+
+  const updateRemoteCollaborator = (userId, x, y, button, selectedElementIds) => {
+    const collab = collaboratorsRef.current.get(userId);
+    if (!collab) return;
+    collaboratorsRef.current.set(userId, {
+      ...collab,
+      pointer: { x, y },
+      button: button || collab.button || "up",
+      selectedElementIds: selectedElementIds || collab.selectedElementIds || {},
+    });
+    excalidrawAPIRef.current?.updateScene({ collaborators: collaboratorsRef.current });
+  };
+
+  // 收到远程指针更新时调用
+  const handleRemotePointerUpdate = (payload) => {
+    if (payload.userId === userInfo.id || !excalidrawAPIRef.current) return;
+
+    // 首次出现该用户时创建基础 collaborators 条目
+    if (!collaboratorsRef.current.has(payload.userId)) {
+      collaboratorsRef.current.set(payload.userId, {
+        pointer: payload.pointer,
+        button: payload.button || "up",
+        username: payload.name,
+        selectedElementIds: payload.selectedElementIds || {},
+      });
+      // 直接初始化动画状态
+      animationsRef.current.set(payload.userId, {
+        displayX: payload.pointer.x,
+        displayY: payload.pointer.y,
+        targetX: payload.pointer.x,
+        targetY: payload.pointer.y,
+        button: payload.button || "up",
+        selectedElementIds: payload.selectedElementIds || {},
+        frameId: null,
+      });
+      excalidrawAPIRef.current.updateScene({ collaborators: collaboratorsRef.current });
+      return;
+    }
+
+    // 更新目标位置
+    let anim = animationsRef.current.get(payload.userId);
+    if (!anim) {
+      anim = {
+        displayX: payload.pointer.x,
+        displayY: payload.pointer.y,
+        targetX: payload.pointer.x,
+        targetY: payload.pointer.y,
+        button: payload.button || "up",
+        selectedElementIds: payload.selectedElementIds || {},
+        frameId: null,
+      };
+      animationsRef.current.set(payload.userId, anim);
+    } else {
+      anim.targetX = payload.pointer.x;
+      anim.targetY = payload.pointer.y;
+      anim.button = payload.button || anim.button;
+      anim.selectedElementIds = payload.selectedElementIds || anim.selectedElementIds;
+    }
+
+    // 如果没有正在运行的动画则启动
+    if (!anim.frameId) {
+      anim.frameId = requestAnimationFrame(() => animatePointer(payload.userId));
+      animationsRef.current.set(payload.userId, anim);
+    }
+  };
+
+  // 用户离开时清理动画
+  const removeRemoteUser = (userId) => {
+    cancelPointerAnimation(userId);
+    collaboratorsRef.current.delete(userId);
+    excalidrawAPIRef.current?.updateScene({ collaborators: collaboratorsRef.current });
+  };
 
   useEffect(() => { injectCSS(); }, []);
 
@@ -90,6 +202,10 @@ export default function App() {
 
     isChannelReadyRef.current = false;
     collaboratorsRef.current.clear();
+    // 清除所有遗留动画
+    animationsRef.current.forEach((anim) => cancelAnimationFrame(anim.frameId));
+    animationsRef.current.clear();
+
     if (channelRef.current) supabase.removeChannel(channelRef.current);
 
     const channel = supabase.channel(`board_${currentBoard.id}`);
@@ -106,14 +222,11 @@ export default function App() {
         },
         (payload) => {
           const remoteContent = parseContent(payload.new.content);
-          // 忽略自己的更新
           if (remoteContent.senderId === userInfo.id) return;
 
           const remoteUpdatedAt = new Date(payload.new.updated_at).getTime();
-          // 只接受比本地更新的版本
           if (remoteUpdatedAt <= lastAppliedTimestampRef.current) return;
 
-          // 应用远程元素
           lastAppliedTimestampRef.current = remoteUpdatedAt;
           isRemoteUpdatingRef.current = true;
           excalidrawAPIRef.current?.updateScene({
@@ -121,38 +234,24 @@ export default function App() {
             commitToHistory: false,
           });
 
-          // 短暂锁定后释放，防止本地 onChange 触发保存
           setTimeout(() => {
             isRemoteUpdatingRef.current = false;
           }, 60);
         }
       )
       .on("broadcast", { event: "pointer_update" }, ({ payload }) => {
-        if (payload.userId === userInfo.id || !excalidrawAPIRef.current) return;
-
-        collaboratorsRef.current.set(payload.userId, {
-          pointer: payload.pointer,
-          button: payload.button || "up",
-          username: payload.name,
-          selectedElementIds: payload.selectedElementIds || {},
-        });
-
-        excalidrawAPIRef.current.updateScene({ collaborators: collaboratorsRef.current });
+        handleRemotePointerUpdate(payload);
       })
       .on("presence", { event: "sync" }, () => {
         const state = channel.presenceState();
         setOnlineUsers(new Map(Object.entries(state)));
 
         const activeUserIds = new Set(Object.keys(state));
-        let hasChanged = false;
-        for (const userId of collaboratorsRef.current.keys()) {
+        // 清理已经离开的用户的动画
+        for (const userId of animationsRef.current.keys()) {
           if (!activeUserIds.has(userId)) {
-            collaboratorsRef.current.delete(userId);
-            hasChanged = true;
+            removeRemoteUser(userId);
           }
-        }
-        if (hasChanged && excalidrawAPIRef.current) {
-          excalidrawAPIRef.current.updateScene({ collaborators: collaboratorsRef.current });
         }
       })
       .subscribe(async (status) => {
@@ -166,6 +265,9 @@ export default function App() {
     return () => {
       isChannelReadyRef.current = false;
       supabase.removeChannel(channel);
+      // 清理所有动画
+      animationsRef.current.forEach((anim) => cancelAnimationFrame(anim.frameId));
+      animationsRef.current.clear();
     };
   }, [currentBoard?.id, userInfo.id]);
 
@@ -180,7 +282,6 @@ export default function App() {
     }, 60);
   };
 
-  // 实际执行数据库保存
   const executeDBSave = async (elements) => {
     if (!currentBoard || isRemoteUpdatingRef.current || !excalidrawAPIRef.current) return;
 
@@ -201,7 +302,6 @@ export default function App() {
         .single();
 
       if (!error && data?.updated_at) {
-        // 更新本地最新时间戳，防止重复应用自己的更新
         lastAppliedTimestampRef.current = Math.max(
           lastAppliedTimestampRef.current,
           new Date(data.updated_at).getTime()
@@ -214,7 +314,6 @@ export default function App() {
       setIsSaving(false);
       lastSaveTimeRef.current = Date.now();
 
-      // 如果在保存期间又有新的待保存元素，立刻执行一次保存
       if (pendingSaveElementsRef.current) {
         const pending = pendingSaveElementsRef.current;
         pendingSaveElementsRef.current = null;
@@ -223,22 +322,18 @@ export default function App() {
     }
   };
 
-  // 优化后的 onChange：缩短节流间隔，放开绘制时的实时同步（但降低频率）
   const handleOnChange = (elements, appState) => {
     if (!currentBoard || isRemoteUpdatingRef.current) return;
 
-    // 决定节流间隔：画笔或拖拽时稍长（150ms），普通操作用极短间隔（80ms）
     const isDrawing = appState.activeTool?.type === "freedraw";
     const isDragging = appState.isDragging;
     const throttleInterval = isDrawing || isDragging ? 150 : 80;
 
     const now = Date.now();
 
-    // 如果上一次保存距今小于间隔，则用防抖推迟保存
     if (now - lastSaveTimeRef.current < throttleInterval) {
       clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => {
-        // 如果正在保存，将最新元素暂存，等待保存完成后自动触发
         if (isSavingRef.current) {
           pendingSaveElementsRef.current = elements;
         } else {
@@ -248,7 +343,6 @@ export default function App() {
       return;
     }
 
-    // 满足间隔，立即保存
     clearTimeout(saveTimer.current);
     if (isSavingRef.current) {
       pendingSaveElementsRef.current = elements;
@@ -257,12 +351,12 @@ export default function App() {
     }
   };
 
-  // 指针广播：保持50ms频率限制
+  // 指针广播频率调整为 33ms（约30fps），比原来的50ms更平滑
   const handlePointerUpdate = (payload) => {
     if (!channelRef.current || !isChannelReadyRef.current) return;
 
     const now = Date.now();
-    if (now - lastPointerSendTimeRef.current < 50) return;
+    if (now - lastPointerSendTimeRef.current < 33) return;
 
     lastPointerSendTimeRef.current = now;
 
