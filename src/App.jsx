@@ -382,7 +382,7 @@ export default function App() {
     if (!channelRef.current || !isChannelReadyRef.current) return;
 
     const now = Date.now();
-    if (now - lastPointerSendTimeRef.current < 40) return;
+    if (now - lastPointerSendTimeRef.current < 20) return;
 
     lastPointerSendTimeRef.current = now;
 
