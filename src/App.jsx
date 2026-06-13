@@ -8,7 +8,7 @@ const SUPABASE_URL = "https://mamubvgmcetepllznifl.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_HEeNPSqD75cWlnmZjcVHKA_Pw-OdL_A";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-const CURSOR_SPEED = 2000; // 远程光标移动速度 (像素/秒)
+const CURSOR_SPEED = 2000;
 
 const injectCSS = () => {
   if (document.getElementById("excalidraw-custom-styles")) return;
@@ -34,6 +34,60 @@ const parseContent = (content) => {
   return { elements: content.elements || [], senderId: content.senderId || "" };
 };
 
+/**
+ * 为元素补充时间戳，用于冲突合并
+ * prevMap: 旧元素 Map(id => element)，为新元素保留原有的 _lastModified，
+ * 若新元素与旧元素内容不同（或新增）则更新为当前时间
+ */
+const stampElements = (newElements, prevMap = new Map()) => {
+  return newElements.map((el) => {
+    const old = prevMap.get(el.id);
+    let lastModified;
+    if (!old) {
+      // 新增元素
+      lastModified = Date.now();
+    } else if (JSON.stringify(old) !== JSON.stringify(el)) {
+      // 内容有变化
+      lastModified = Date.now();
+    } else {
+      // 未变化，继承旧时间戳
+      lastModified = old._lastModified || Date.now();
+    }
+    return { ...el, _lastModified: lastModified };
+  });
+};
+
+/**
+ * 合并远程元素与本地元素（用于应用远程更新）
+ * 基于 _lastModified 时间戳，保留较新的版本
+ */
+const mergeElements = (remoteElements, localElements) => {
+  const merged = new Map();
+
+  // 先放入本地元素
+  for (const el of localElements) {
+    merged.set(el.id, { ...el });
+  }
+
+  // 再合并远程元素
+  for (const rEl of remoteElements) {
+    const local = merged.get(rEl.id);
+    if (!local) {
+      merged.set(rEl.id, { ...rEl });
+    } else {
+      // 冲突：谁的时间戳更新就用谁
+      const rTime = rEl._lastModified || 0;
+      const lTime = local._lastModified || 0;
+      if (rTime > lTime) {
+        merged.set(rEl.id, { ...rEl });
+      }
+      // 否则保留本地
+    }
+  }
+
+  return Array.from(merged.values());
+};
+
 export default function App() {
   const [userInfo, setUserInfo] = useState({ id: "", name: "访客", isLoggedIn: false });
   const [publicBoards, setPublicBoards] = useState([]);
@@ -48,7 +102,7 @@ export default function App() {
   const moveEndTimer = useRef(null);
   const channelRef = useRef(null);
 
-  const lastAppliedTimestampRef = useRef(0);
+  const lastAppliedTimestampRef = useRef(0); // 数据库 updated_at 的时间戳
   const isRemoteUpdatingRef = useRef(false);
   const lastPointerSendTimeRef = useRef(0);
 
@@ -59,12 +113,15 @@ export default function App() {
   const pendingSaveElementsRef = useRef(null);
 
   const hasUnsavedChangesRef = useRef(false);
-  const latestElementsRef = useRef(null);
+  const latestElementsRef = useRef(null); // 当前画布最新的元素（含 _lastModified）
 
   // 缓存被忽略的远程更新（当本地有未保存更改时）
   const pendingRemoteUpdateRef = useRef(null);
 
   const animationFrameIdRef = useRef(null);
+
+  // 用于标记元素时间戳的旧元素映射（上一次 onChange 时的元素）
+  const prevElementsMapRef = useRef(new Map());
 
   useEffect(() => { injectCSS(); }, []);
 
@@ -76,16 +133,12 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           setUserInfo({ id: randomId, name: data.username, isLoggedIn: true });
-          
-          // 💡 修复：直接把刚拿到的 data.username 传过去
-          await fetchBoards(data.username); 
+          await fetchBoards(data.username);
         } else throw new Error();
       } catch {
         const guestName = `访客_${Math.floor(Math.random() * 1000)}`;
         setUserInfo({ id: randomId, name: guestName, isLoggedIn: false });
-        
-        // 💡 修复：失败时把生成的访客名传过去
-        await fetchBoards(guestName); 
+        await fetchBoards(guestName);
       }
     };
     initUser();
@@ -93,12 +146,11 @@ export default function App() {
 
   const fetchBoards = async (currentNameOverride) => {
     const activeUsername = currentNameOverride || userInfo.name;
-    
-    // 💡 修复 1：使用 .or() 语法，只查询公开的、或者主人是自己的白板
+
     const { data, error } = await supabase
       .from("whiteboards")
       .select("*")
-      .or(`is_public.eq.true,owner.eq."${activeUsername}"`) // 👈 核心安全锁
+      .or(`is_public.eq.true,owner.eq."${activeUsername}"`)
       .order("updated_at", { ascending: false });
 
     if (error) return console.error("获取白板失败:", error);
@@ -109,7 +161,6 @@ export default function App() {
     setPublicBoards(publicList);
     setPrivateBoards(privateList);
 
-    // 💡 修复 2：调整默认选中逻辑，优先进入自己的私密白板，没有再进入公共白板
     if (!currentBoard) {
       const defaultBoard = privateList.length > 0 ? privateList[0] : (publicList.length > 0 ? publicList[0] : null);
       setCurrentBoard(defaultBoard);
@@ -216,16 +267,24 @@ export default function App() {
     };
   }, [currentBoard?.id, userInfo.id]);
 
-  // 应用远程更新（被复用的逻辑）
-  const applyRemoteUpdate = (elements, updatedAt) => {
+  // 应用远程更新：与本地元素合并而非直接覆盖
+  const applyRemoteUpdate = (remoteElements, updatedAt) => {
     if (!excalidrawAPIRef.current) return;
+    const localElements = excalidrawAPIRef.current.getSceneElements() || [];
+    // 确保远程元素有时间戳（旧数据可能没有）
+    const stampedRemote = remoteElements.map(el => ({ ...el, _lastModified: el._lastModified || updatedAt }));
+    const merged = mergeElements(stampedRemote, localElements);
     lastAppliedTimestampRef.current = updatedAt;
     isRemoteUpdatingRef.current = true;
     excalidrawAPIRef.current.updateScene({
-      elements,
+      elements: merged,
       commitToHistory: false,
     });
-    latestElementsRef.current = structuredClone(elements);
+    latestElementsRef.current = structuredClone(merged);
+    // 更新 prevElementsMapRef 为合并后的映射，保证后续本地编辑的时间戳正确
+    const newMap = new Map();
+    merged.forEach(el => newMap.set(el.id, el));
+    prevElementsMapRef.current = newMap;
     setTimeout(() => {
       isRemoteUpdatingRef.current = false;
     }, 60);
@@ -303,15 +362,24 @@ export default function App() {
   const loadBoardToCanvas = (board) => {
     if (!excalidrawAPIRef.current || !board) return;
     const parsed = parseContent(board.content);
-    const elements = parsed.elements;
+    let elements = parsed.elements;
 
-    lastAppliedTimestampRef.current = new Date(board.updated_at).getTime();
+    // 为旧元素补充时间戳
+    const boardTime = new Date(board.updated_at).getTime();
+    elements = elements.map(el => ({ ...el, _lastModified: el._lastModified || boardTime }));
+
+    lastAppliedTimestampRef.current = boardTime;
 
     clearTimeout(saveTimer.current);
     clearTimeout(moveEndTimer.current);
     hasUnsavedChangesRef.current = false;
     pendingRemoteUpdateRef.current = null;
     latestElementsRef.current = structuredClone(elements);
+
+    // 更新 prevElementsMapRef
+    const newMap = new Map();
+    elements.forEach(el => newMap.set(el.id, el));
+    prevElementsMapRef.current = newMap;
 
     isRemoteUpdatingRef.current = true;
     excalidrawAPIRef.current.updateScene({ elements });
@@ -320,26 +388,78 @@ export default function App() {
     }, 60);
   };
 
+  /**
+   * 乐观并发保存：
+   * 只有 updated_at 匹配时才写入，否则表示有并发更新，需要拉取最新数据合并后重试
+   */
   const executeDBSave = async (elements) => {
     if (!currentBoard || isRemoteUpdatingRef.current || !excalidrawAPIRef.current) return;
 
     isSavingRef.current = true;
     setIsSaving(true);
 
+    // 深拷贝要保存的元素，避免外部修改
+    let elementsToSave = structuredClone(elements);
     const wrappedPayload = {
-      elements: elements,
+      elements: elementsToSave,
       senderId: userInfo.id,
     };
 
     try {
-      const { data, error } = await supabase
+      // 乐观锁：仅当 updated_at 与本地记录的时间戳一致时才允许更新
+      const knownTimestamp = new Date(lastAppliedTimestampRef.current).toISOString();
+      const { data, error, count } = await supabase
         .from("whiteboards")
         .update({ content: wrappedPayload, updated_at: new Date().toISOString() })
         .eq("id", currentBoard.id)
+        .eq("updated_at", knownTimestamp)
         .select("updated_at")
         .single();
 
-      if (!error && data?.updated_at) {
+      if (error || !data) {
+        // 冲突：有人在我们不知情的情况下更新了
+        console.warn("保存冲突，尝试合并…");
+        // 拉取最新远程数据
+        const { data: latest } = await supabase
+          .from("whiteboards")
+          .select("content, updated_at")
+          .eq("id", currentBoard.id)
+          .single();
+
+        if (latest) {
+          const remoteParsed = parseContent(latest.content);
+          const remoteTime = new Date(latest.updated_at).getTime();
+          const stampedRemote = remoteParsed.elements.map(el => ({
+            ...el,
+            _lastModified: el._lastModified || remoteTime,
+          }));
+          // 合并：以本地的修改优先（本地元素时间戳更新）
+          const localElements = elementsToSave;
+          const merged = mergeElements(stampedRemote, localElements);
+
+          // 更新本地画布为合并结果
+          excalidrawAPIRef.current.updateScene({ elements: merged, commitToHistory: false });
+          latestElementsRef.current = structuredClone(merged);
+          const newMap = new Map();
+          merged.forEach(el => newMap.set(el.id, el));
+          prevElementsMapRef.current = newMap;
+
+          // 更新本地时间戳为最新的远程时间，以便下次保存
+          lastAppliedTimestampRef.current = remoteTime;
+
+          // 递归重试保存（此时是合并后的数据）
+          isSavingRef.current = false;
+          setIsSaving(false);
+          return executeDBSave(merged);
+        }
+        // 如果拉取失败，放弃本次保存
+        isSavingRef.current = false;
+        setIsSaving(false);
+        return;
+      }
+
+      // 保存成功，更新时间戳
+      if (data?.updated_at) {
         lastAppliedTimestampRef.current = Math.max(
           lastAppliedTimestampRef.current,
           new Date(data.updated_at).getTime()
@@ -351,7 +471,6 @@ export default function App() {
       if (pendingRemoteUpdateRef.current) {
         const pending = pendingRemoteUpdateRef.current;
         pendingRemoteUpdateRef.current = null;
-        // 再次确认时间戳，防止应用旧数据
         if (pending.updatedAt > lastAppliedTimestampRef.current) {
           applyRemoteUpdate(pending.elements, pending.updatedAt);
         }
@@ -362,6 +481,7 @@ export default function App() {
       isSavingRef.current = false;
       setIsSaving(false);
 
+      // 处理保存期间积压的新变更
       if (pendingSaveElementsRef.current) {
         const pending = pendingSaveElementsRef.current;
         pendingSaveElementsRef.current = null;
@@ -373,30 +493,36 @@ export default function App() {
   const handleOnChange = (elements) => {
     if (!currentBoard || isRemoteUpdatingRef.current) return;
 
-    // 这里的对比现在有效了，因为 latestElementsRef 存的是真正的历史快照
-    if (latestElementsRef.current && JSON.stringify(elements) === JSON.stringify(latestElementsRef.current)) {
+    // 为元素添加/更新时间戳（通过比较旧映射）
+    const prevMap = prevElementsMapRef.current;
+    const stampedElements = stampElements(elements, prevMap);
+
+    // 更新 prevElementsMapRef 为当前快照
+    const newMap = new Map();
+    stampedElements.forEach(el => newMap.set(el.id, el));
+    prevElementsMapRef.current = newMap;
+
+    if (latestElementsRef.current && JSON.stringify(stampedElements) === JSON.stringify(latestElementsRef.current)) {
       return;
     }
 
-    // 💡 修复：使用 structuredClone 进行深拷贝，断开内存引用
-    latestElementsRef.current = structuredClone(elements); 
+    latestElementsRef.current = structuredClone(stampedElements);
     hasUnsavedChangesRef.current = true;
 
-    // 现在这里的 clearTimeout 能够在持续拖拽时正常工作了！
     clearTimeout(moveEndTimer.current);
     moveEndTimer.current = setTimeout(() => {
       if (hasUnsavedChangesRef.current && !isSavingRef.current) {
         clearTimeout(saveTimer.current);
-        executeDBSave(elements);
+        executeDBSave(stampedElements);
       }
     }, 300);
 
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       if (isSavingRef.current) {
-        pendingSaveElementsRef.current = elements;
+        pendingSaveElementsRef.current = stampedElements;
       } else {
-        executeDBSave(elements);
+        executeDBSave(stampedElements);
       }
     }, 800);
   };
