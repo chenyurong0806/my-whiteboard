@@ -3,8 +3,8 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Excalidraw } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import { createClient } from "@supabase/supabase-js";
-import "./app.css";
-import "./index.css";
+import "./app.scss";
+import "./index.scss";
 
 const SUPABASE_URL = "https://mamubvgmcetepllznifl.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_HEeNPSqD75cWlnmZjcVHKA_Pw-OdL_A";
