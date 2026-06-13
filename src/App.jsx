@@ -76,20 +76,36 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           setUserInfo({ id: randomId, name: data.username, isLoggedIn: true });
+          
+          // 💡 修复：直接把刚拿到的 data.username 传过去
+          await fetchBoards(data.username); 
         } else throw new Error();
       } catch {
-        setUserInfo({ id: randomId, name: `访客_${Math.floor(Math.random() * 1000)}`, isLoggedIn: false });
+        const guestName = `访客_${Math.floor(Math.random() * 1000)}`;
+        setUserInfo({ id: randomId, name: guestName, isLoggedIn: false });
+        
+        // 💡 修复：失败时把生成的访客名传过去
+        await fetchBoards(guestName); 
       }
-      await fetchBoards();
     };
     initUser();
   }, []);
 
-  const fetchBoards = async () => {
-    const { data, error } = await supabase.from("whiteboards").select("*").order("updated_at", { ascending: false });
+  // 💡 修改：允许接收一个名字参数
+  const fetchBoards = async (currentNameOverride) => {
+    const { data, error } = await supabase
+      .from("whiteboards")
+      .select("*")
+      .order("updated_at", { ascending: false });
+
     if (error) return console.error("获取白板失败:", error);
-    setPublicBoards(data.filter(b => b.is_public));
-    setPrivateBoards(data.filter(b => b.owner === userInfo.name && !b.is_public));
+
+    // 💡 修复：如果传了新名字就用新名字，否则用状态里的名字
+    const activeUsername = currentNameOverride || userInfo.name;
+
+    setPublicBoards(data.filter((b) => b.is_public));
+    setPrivateBoards(data.filter((b) => b.owner === activeUsername && !b.is_public)); // 👈 使用正确的名字过滤
+
     if (!currentBoard && data.length > 0) setCurrentBoard(data[0]);
   };
 
