@@ -3,23 +3,14 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Excalidraw } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import { createClient } from "@supabase/supabase-js";
+import "./app.css";
+import "./index.css";
 
 const SUPABASE_URL = "https://mamubvgmcetepllznifl.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_HEeNPSqD75cWlnmZjcVHKA_Pw-OdL_A";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const CURSOR_SPEED = 2000; // 远程光标移动速度 (像素/秒)
-
-const injectCSS = () => {
-  if (document.getElementById("excalidraw-custom-styles")) return;
-  const style = document.createElement("style");
-  style.id = "excalidraw-custom-styles";
-  style.innerHTML = `
-    .sidebar-transition { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
-    .hide-scrollbar::-webkit-scrollbar { display: none; }
-  `;
-  document.head.appendChild(style);
-};
 
 const parseContent = (content) => {
   if (!content) return { elements: [], senderId: "" };
@@ -66,8 +57,6 @@ export default function App() {
 
   const animationFrameIdRef = useRef(null);
 
-  useEffect(() => { injectCSS(); }, []);
-
   useEffect(() => {
     const initUser = async () => {
       const randomId = Math.random().toString(36).substring(2, 10);
@@ -76,15 +65,11 @@ export default function App() {
         if (res.ok) {
           const data = await res.json();
           setUserInfo({ id: randomId, name: data.username, isLoggedIn: true });
-          
-          // 💡 修复：直接把刚拿到的 data.username 传过去
           await fetchBoards(data.username); 
         } else throw new Error();
       } catch {
         const guestName = `访客_${Math.floor(Math.random() * 1000)}`;
         setUserInfo({ id: randomId, name: guestName, isLoggedIn: false });
-        
-        // 💡 修复：失败时把生成的访客名传过去
         await fetchBoards(guestName); 
       }
     };
@@ -94,11 +79,10 @@ export default function App() {
   const fetchBoards = async (currentNameOverride) => {
     const activeUsername = currentNameOverride || userInfo.name;
     
-    // 💡 修复 1：使用 .or() 语法，只查询公开的、或者主人是自己的白板
     const { data, error } = await supabase
       .from("whiteboards")
       .select("*")
-      .or(`is_public.eq.true,owner.eq."${activeUsername}"`) // 👈 核心安全锁
+      .or(`is_public.eq.true,owner.eq."${activeUsername}"`)
       .order("updated_at", { ascending: false });
 
     if (error) return console.error("获取白板失败:", error);
@@ -109,7 +93,6 @@ export default function App() {
     setPublicBoards(publicList);
     setPrivateBoards(privateList);
 
-    // 💡 修复 2：调整默认选中逻辑，优先进入自己的私密白板，没有再进入公共白板
     if (!currentBoard) {
       const defaultBoard = privateList.length > 0 ? privateList[0] : (publicList.length > 0 ? publicList[0] : null);
       setCurrentBoard(defaultBoard);
@@ -148,7 +131,6 @@ export default function App() {
           const remoteUpdatedAt = new Date(payload.new.updated_at).getTime();
           if (remoteUpdatedAt <= lastAppliedTimestampRef.current) return;
 
-          // 如果本地有未保存的更改，先缓存这次远程更新，等保存完成后再应用
           if (hasUnsavedChangesRef.current) {
             pendingRemoteUpdateRef.current = { elements: remoteContent.elements, updatedAt: remoteUpdatedAt };
             return;
@@ -204,13 +186,11 @@ export default function App() {
       });
 
     return () => {
-      // ✅ 先尝试保存当前白板未保存的更改
       if (
         hasUnsavedChangesRef.current &&
         currentBoard &&
         latestElementsRef.current
       ) {
-        // 不等待结果，直接发起保存（这里 currentBoard 还是旧的白板）
         executeDBSave(latestElementsRef.current);
       }
 
@@ -225,7 +205,6 @@ export default function App() {
     };
   }, [currentBoard?.id, userInfo.id]);
 
-  // 应用远程更新（被复用的逻辑）
   const applyRemoteUpdate = (elements, updatedAt) => {
     if (!excalidrawAPIRef.current) return;
     lastAppliedTimestampRef.current = updatedAt;
@@ -309,34 +288,13 @@ export default function App() {
     return anyMoving;
   };
 
-  const loadBoardToCanvas = (board) => {
-    if (!excalidrawAPIRef.current || !board) return;
-    const parsed = parseContent(board.content);
-    const elements = parsed.elements;
-
-    lastAppliedTimestampRef.current = new Date(board.updated_at).getTime();
-
-    clearTimeout(saveTimer.current);
-    clearTimeout(moveEndTimer.current);
-    hasUnsavedChangesRef.current = false;
-    pendingRemoteUpdateRef.current = null;
-    latestElementsRef.current = structuredClone(elements);
-
-    isRemoteUpdatingRef.current = true;
-    excalidrawAPIRef.current.updateScene({ elements });
-    setTimeout(() => {
-      isRemoteUpdatingRef.current = false;
-    }, 60);
-  };
-
   const executeDBSave = async (elements) => {
     if (!currentBoard || isRemoteUpdatingRef.current || !excalidrawAPIRef.current) return;
 
-    // ✅ 权限检查：私有白板只有所有者才能保存
     if (!currentBoard.is_public && currentBoard.owner !== userInfo.name) {
       console.warn("⛔ 你没有权限修改此私有白板");
-      hasUnsavedChangesRef.current = false;      // 避免反复尝试保存
-      pendingRemoteUpdateRef.current = null;     // 丢弃暂存的远程更新
+      hasUnsavedChangesRef.current = false;
+      pendingRemoteUpdateRef.current = null;
       return;
     }
     
@@ -364,11 +322,9 @@ export default function App() {
       }
       hasUnsavedChangesRef.current = false;
 
-      // 保存成功，检查是否有被暂存的远程更新需要应用
       if (pendingRemoteUpdateRef.current) {
         const pending = pendingRemoteUpdateRef.current;
         pendingRemoteUpdateRef.current = null;
-        // 再次确认时间戳，防止应用旧数据
         if (pending.updatedAt > lastAppliedTimestampRef.current) {
           applyRemoteUpdate(pending.elements, pending.updatedAt);
         }
@@ -390,16 +346,13 @@ export default function App() {
   const handleOnChange = (elements) => {
     if (!currentBoard || isRemoteUpdatingRef.current) return;
 
-    // 这里的对比现在有效了，因为 latestElementsRef 存的是真正的历史快照
     if (latestElementsRef.current && JSON.stringify(elements) === JSON.stringify(latestElementsRef.current)) {
       return;
     }
 
-    // 💡 修复：使用 structuredClone 进行深拷贝，断开内存引用
     latestElementsRef.current = structuredClone(elements); 
     hasUnsavedChangesRef.current = true;
 
-    // 现在这里的 clearTimeout 能够在持续拖拽时正常工作了！
     clearTimeout(moveEndTimer.current);
     moveEndTimer.current = setTimeout(() => {
       if (hasUnsavedChangesRef.current && !isSavingRef.current) {
@@ -474,76 +427,63 @@ export default function App() {
     await fetchBoards();
   };
 
-  const layoutStyles = {
-    container: {
-      display: "flex",
-      height: "100vh",
-      width: "100vw",
-      backgroundColor: "#f8f9fa",
-      padding: isSidebarOpen ? "14px" : "0px",
-      gap: isSidebarOpen ? "14px" : "0px",
-      boxSizing: "border-box",
-      overflow: "hidden",
-    },
-    sidebar: {
-      width: isSidebarOpen ? "280px" : "0px",
-      opacity: isSidebarOpen ? 1 : 0,
-      padding: isSidebarOpen ? "20px 16px" : "0px",
-      background: "#ffffff",
-      borderRadius: "16px",
-      display: "flex",
-      flexDirection: "column",
-      boxShadow: "0 4px 12px rgba(0,0,0,0.03)",
-      overflow: "hidden",
-      whiteSpace: "nowrap",
-    },
-    main: {
-      flex: 1,
-      borderRadius: isSidebarOpen ? "16px" : "0px",
-      background: "#ffffff",
-      display: "flex",
-      flexDirection: "column",
-      overflow: "hidden",
-      position: "relative",
-      boxShadow: isSidebarOpen ? "0 4px 24px rgba(0,0,0,0.06)" : "none",
-    },
-  };
-
   return (
-    <div className="sidebar-transition" style={layoutStyles.container}>
-      <div className="sidebar-transition" style={layoutStyles.sidebar}>
-        <div style={styles.userInfoCard}>
-          <div style={styles.avatar}>{userInfo.name.charAt(0)}</div>
+    <div 
+      className="app-container sidebar-transition" 
+      style={{
+        padding: isSidebarOpen ? "16px" : "0px",
+        gap: isSidebarOpen ? "16px" : "0px",
+      }}
+    >
+      {/* --- 左侧抽屉菜单 (MD3 Navigation Drawer) --- */}
+      <div 
+        className="md3-sidebar sidebar-transition"
+        style={{
+          width: isSidebarOpen ? "320px" : "0px",
+          opacity: isSidebarOpen ? 1 : 0,
+          padding: isSidebarOpen ? "24px 16px" : "0px",
+        }}
+      >
+        {/* 用户信息卡片 */}
+        <div className="md3-user-card">
+          <div className="md3-avatar md3-interactive">{userInfo.name.charAt(0)}</div>
           <div>
-            <div style={styles.userName}>{userInfo.name}</div>
-            <div style={{ ...styles.userStatus, color: userInfo.isLoggedIn ? "#34A853" : "#9AA0A6" }}>
-              ● {userInfo.isLoggedIn ? "已登录" : "访客模式"}
+            <div className="md3-user-name">{userInfo.name}</div>
+            <div className="md3-user-status" style={{ color: userInfo.isLoggedIn ? "#146C2E" : "#79747E" }}>
+              <span style={{ fontSize: "16px", lineHeight: 0 }}>●</span> {userInfo.isLoggedIn ? "已登录" : "访客模式"}
             </div>
           </div>
         </div>
 
-        <div className="hide-scrollbar" style={styles.scrollArea}>
-          <div style={styles.sectionTitle}>
+        {/* 可滚动列表区 */}
+        <div className="hide-scrollbar" style={{ flex: 1, overflowY: "auto" }}>
+          
+          <div className="md3-section-title">
             我的私密白板
-            {userInfo.isLoggedIn && <button onClick={handleCreateBoard} style={styles.fabBtn}>+</button>}
+            {userInfo.isLoggedIn && (
+              <button className="md3-fab-small md3-interactive" onClick={handleCreateBoard}>
+                +
+              </button>
+            )}
           </div>
+
           {privateBoards.map((board) => (
             <div
               key={board.id}
               onClick={() => setCurrentBoard(board)}
-              style={{
-                ...styles.roomItem,
-                borderColor: currentBoard?.id === board.id ? "#1a73e8" : "#dadce0",
-              }}
+              className={`md3-nav-item md3-interactive ${currentBoard?.id === board.id ? 'active' : ''}`}
             >
-              <span style={styles.truncate}>{board.title}</span>
-              <div style={styles.actions}>
-                <button onClick={(e) => handleTogglePublish(board, e)} style={styles.textBtn}>
+              <span className="md3-nav-title">{board.title}</span>
+              <div style={{ display: "flex", gap: "4px" }}>
+                <button 
+                  onClick={(e) => handleTogglePublish(board, e)} 
+                  className="md3-text-btn primary md3-interactive"
+                >
                   公开
                 </button>
                 <button
                   onClick={(e) => handleDeleteBoard(board, e)}
-                  style={{ ...styles.textBtn, color: "#d93025" }}
+                  className="md3-text-btn danger md3-interactive"
                 >
                   删
                 </button>
@@ -551,32 +491,30 @@ export default function App() {
             </div>
           ))}
 
-          <div style={{ ...styles.sectionTitle, marginTop: "24px" }}>🌐 公共大厅</div>
+          <div className="md3-section-title" style={{ marginTop: "32px" }}>🌐 公共大厅</div>
           {publicBoards.map((board) => (
             <div
               key={board.id}
               onClick={() => setCurrentBoard(board)}
-              style={{
-                ...styles.roomItem,
-                borderColor: currentBoard?.id === board.id ? "#34a853" : "#dadce0",
-              }}
+              className={`md3-nav-item md3-interactive ${currentBoard?.id === board.id ? 'active' : ''}`}
             >
               <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
-                <span style={styles.truncate}>{board.title}</span>
-                <span style={styles.ownerTag}>by {board.owner}</span>
+                <span className="md3-nav-title">{board.title}</span>
+                <span style={{ fontSize: "11px", opacity: 0.7, marginTop: "2px" }}>by {board.owner}</span>
               </div>
-              <div style={styles.actions}>
+              
+              <div style={{ display: "flex", gap: "4px" }}>
                 {board.owner === userInfo.name && (
                   <>
                     <button
                       onClick={(e) => handleTogglePublish(board, e)}
-                      style={{ ...styles.textBtn, color: "#f29900" }}
+                      className="md3-text-btn primary md3-interactive"
                     >
                       私有
                     </button>
                     <button
                       onClick={(e) => handleDeleteBoard(board, e)}
-                      style={{ ...styles.textBtn, color: "#d93025" }}
+                      className="md3-text-btn danger md3-interactive"
                     >
                       删
                     </button>
@@ -587,38 +525,42 @@ export default function App() {
           ))}
         </div>
 
-        <div style={styles.onlineBadge}>
-          <div style={styles.pulseDot}></div> 房间内在线: {onlineUsers.size}
+        {/* 在线状态 Badge */}
+        <div className="md3-online-badge">
+          <div style={{ width: 8, height: 8, backgroundColor: "#21005D", borderRadius: "50%" }}></div> 
+          房间内在线: {onlineUsers.size}
         </div>
       </div>
 
-      <div className="sidebar-transition" style={layoutStyles.main}>
-        <div
-          style={{
-            position: "absolute",
-            top: 16,
-            left: 16,
-            zIndex: 10,
-            display: "flex",
-            gap: "12px",
-            alignItems: "center",
-          }}
-        >
-          <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} style={styles.toggleSidebarBtn}>
-            {isSidebarOpen ? "◀" : "▶"}
+      {/* --- 右侧主工作区 --- */}
+      <div 
+        className="md3-main-area sidebar-transition"
+        style={{
+          borderRadius: isSidebarOpen ? "24px" : "0px",
+        }}
+      >
+        {/* 顶部浮动操作栏 */}
+        <div className="md3-floating-bar">
+          <button 
+            onClick={() => setIsSidebarOpen(!isSidebarOpen)} 
+            className="md3-icon-btn md3-interactive"
+          >
+            {isSidebarOpen ? "◀" : "☰"}
           </button>
-          <div style={styles.floatingTitleCard}>
+          
+          <div className="md3-top-card">
             <span style={{ fontWeight: 600 }}>{currentBoard?.title || "未选择白板"}</span>
             {currentBoard && (
-              <span style={styles.tag}>{currentBoard.is_public ? "公共" : "私密"}</span>
+              <span className="md3-chip">{currentBoard.is_public ? "公共" : "私密"}</span>
             )}
-            <span style={{ fontSize: "12px", marginLeft: "8px", color: isSaving ? "#f29900" : "#34a853" }}>
+            <span style={{ fontSize: "12px", marginLeft: "12px", color: isSaving ? "var(--md-sys-color-primary)" : "#146C2E", fontWeight: 500 }}>
               {isSaving ? "云同步中..." : "已保存到云"}
             </span>
           </div>
         </div>
 
-        <div style={{ flex: 1, position: "relative" }}>
+        {/* 白板画布容器 */}
+        <div style={{ flex: 1, position: "relative", borderRadius: "inherit" }}>
           <Excalidraw
             excalidrawAPI={(api) => {
               excalidrawAPIRef.current = api;
@@ -633,133 +575,3 @@ export default function App() {
     </div>
   );
 }
-
-const styles = {
-  userInfoCard: {
-    display: "flex",
-    gap: "12px",
-    alignItems: "center",
-    marginBottom: "20px",
-    paddingBottom: "16px",
-    borderBottom: "1px solid #e8eaed",
-  },
-  avatar: {
-    width: "40px",
-    height: "40px",
-    borderRadius: "50%",
-    backgroundColor: "#1a73e8",
-    color: "#fff",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    fontSize: "16px",
-    fontWeight: "bold",
-  },
-  userName: { fontWeight: "600", color: "#202124", fontSize: "14px" },
-  userStatus: { fontSize: "11px", marginTop: "4px", fontWeight: 600 },
-  scrollArea: { flex: 1, overflowY: "auto" },
-  sectionTitle: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    fontWeight: "700",
-    color: "#5f6368",
-    fontSize: "12px",
-    marginBottom: "12px",
-    letterSpacing: "0.3px",
-  },
-  roomItem: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "10px 12px",
-    borderRadius: "8px",
-    cursor: "pointer",
-    background: "#fff",
-    marginBottom: "8px",
-    border: "1px solid transparent",
-    transition: "all 0.2s",
-  },
-  truncate: {
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    fontSize: "13px",
-    color: "#3c4043",
-    fontWeight: "500",
-    maxWidth: "100px",
-  },
-  ownerTag: { fontSize: "11px", color: "#80868b", marginTop: "2px" },
-  actions: { display: "flex", gap: "2px" },
-  fabBtn: {
-    borderRadius: "50%",
-    width: "24px",
-    height: "24px",
-    border: "none",
-    background: "#1a73e8",
-    color: "#fff",
-    cursor: "pointer",
-    fontSize: "16px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    boxShadow: "0 2px 4px rgba(26,115,232,0.2)",
-  },
-  textBtn: {
-    fontSize: "11px",
-    padding: "4px 6px",
-    borderRadius: "4px",
-    border: "none",
-    background: "transparent",
-    color: "#1a73e8",
-    cursor: "pointer",
-    fontWeight: "600",
-  },
-  onlineBadge: {
-    marginTop: "16px",
-    padding: "10px",
-    background: "#e6f4ea",
-    borderRadius: "8px",
-    fontSize: "12px",
-    color: "#137333",
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    fontWeight: "600",
-  },
-  pulseDot: { width: "8px", height: "8px", backgroundColor: "#34A853", borderRadius: "50%" },
-  toggleSidebarBtn: {
-    width: "40px",
-    height: "40px",
-    borderRadius: "8px",
-    border: "none",
-    background: "#ffffff",
-    color: "#5f6368",
-    cursor: "pointer",
-    boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    fontSize: "12px",
-  },
-  floatingTitleCard: {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    padding: "0 16px",
-    height: "40px",
-    background: "#ffffff",
-    borderRadius: "8px",
-    boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
-    fontSize: "13px",
-    color: "#202124",
-  },
-  tag: {
-    fontSize: "10px",
-    padding: "2px 6px",
-    background: "#e8f0fe",
-    color: "#1a73e8",
-    borderRadius: "4px",
-    fontWeight: "600",
-  },
-};

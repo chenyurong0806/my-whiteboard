@@ -1,19 +1,30 @@
 /* src/index.css */
 :root {
-  /* MD3 橙色主题色系 */
+  /* MD3 橙色主题色系 (Amber/Orange) */
   --md-sys-color-primary: #E65100;
+  --md-sys-color-on-primary: #FFFFFF;
   --md-sys-color-primary-container: #FFCC80;
   --md-sys-color-on-primary-container: #4E1800;
-  --md-sys-color-surface: #F8F9FA;
-  --md-sys-color-surface-container: #FFFFFF;
-  --md-sys-color-outline: #E0E0E0;
+  --md-sys-color-secondary-container: #FFDBCF;
+  --md-sys-color-on-secondary-container: #2C150E;
+  --md-sys-color-surface: #FFF8F6;
+  --md-sys-color-surface-container-low: #FFF1EC;
+  --md-sys-color-surface-container: #FFEAE4;
+  --md-sys-color-surface-container-high: #FCE0D6;
+  --md-sys-color-outline: #85736E;
+  --md-sys-color-error: #BA1A1A;
+
+  /* MD3 阴影与高度 (Elevation) */
+  --md-elevation-1: 0px 1px 2px 0px rgba(0,0,0,0.3), 0px 1px 3px 1px rgba(0,0,0,0.15);
+  --md-elevation-2: 0px 1px 2px 0px rgba(0,0,0,0.3), 0px 2px 6px 2px rgba(0,0,0,0.15);
+  --md-elevation-3: 0px 4px 8px 3px rgba(0,0,0,0.15), 0px 1px 3px 0px rgba(0,0,0,0.3);
 }
 
 body {
   margin: 0;
   padding: 0;
   background-color: var(--md-sys-color-surface);
-  font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-family: 'Roboto', 'Segoe UI', Helvetica, Arial, sans-serif;
   color: #1F1F1F;
 }
 
@@ -21,5 +32,14 @@ body {
 .excalidraw-wrapper {
   border-radius: 24px;
   overflow: hidden;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  box-shadow: var(--md-elevation-2);
+}
+
+/* 隐藏滚动条但保留滚动功能 */
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
