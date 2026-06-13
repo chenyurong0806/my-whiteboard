@@ -162,6 +162,7 @@ export default function App() {
         setTimeout(() => { isRemoteUpdatingRef.current = false; }, 0);
       })
       .subscribe(async (status) => {
+        console.log("SUB STATUS:", status);
         if (status === "SUBSCRIBED") {
           await channel.track({ name: userInfo.name, pointer: null });
         }
