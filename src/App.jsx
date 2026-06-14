@@ -185,6 +185,7 @@ export default function App() {
         }
       });
 
+    loadBoardToCanvas(currentBoard);
     return () => {
       if (
         hasUnsavedChangesRef.current &&
