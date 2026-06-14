@@ -32,7 +32,12 @@ export default function App() {
   const [currentBoard, setCurrentBoard] = useState(null);
   const [onlineUsers, setOnlineUsers] = useState(new Map());
   const [isSaving, setIsSaving] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false); // 移动端默认关闭
+
+  // 侧边栏宽度（桌面端）
+  const [sidebarWidth, setSidebarWidth] = useState(280);
+  const [isMobile, setIsMobile] = useState(window.innerWidth <= 1024);
+  const isResizing = useRef(false);
 
   const excalidrawAPIRef = useRef(null);
   const saveTimer = useRef(null);
@@ -58,6 +63,36 @@ export default function App() {
   // 广播防抖定时器
   const broadcastTimer = useRef(null);
 
+  // 拖拽分隔线逻辑
+  const handleResizeStart = (e) => {
+    e.preventDefault();
+    isResizing.current = true;
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+
+    const sidebarEl = document.querySelector(".sidebar");
+    if (sidebarEl) sidebarEl.style.transition = "none";
+
+    const onMouseMove = (e) => {
+      if (!isResizing.current) return;
+      const delta = e.clientX - startX;
+      const newWidth = Math.min(500, Math.max(200, startWidth + delta));
+      setSidebarWidth(newWidth);
+    };
+
+    const onMouseUp = () => {
+      isResizing.current = false;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      if (sidebarEl) {
+        sidebarEl.style.transition = "width 0.3s cubic-bezier(0.4, 0, 0.2, 1), padding 0.3s ease";
+      }
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  };
+
   useEffect(() => {
     const forceSave = () => {
       if (!hasUnsavedChangesRef.current || !currentBoard) return;
@@ -80,7 +115,6 @@ export default function App() {
     window.addEventListener('beforeunload', forceSave);
     return () => {
       window.removeEventListener('beforeunload', forceSave);
-      // 正常卸载时也异步保存
       if (hasUnsavedChangesRef.current && currentBoard) {
         const elements = excalidrawAPIRef.current?.getSceneElements();
         if (elements) executeDBSave(elements, true);
@@ -299,11 +333,9 @@ export default function App() {
       });
 
     return () => {
-      // 强制保存未提交的更改
       const trySaveUnsaved = () => {
         if (!hasUnsavedChangesRef.current || !currentBoard) return;
         
-        // 【关键修复】获取包括被删除的完整元素记录
         const currentElements = excalidrawAPIRef.current?.getSceneElementsIncludingDeleted 
             ? excalidrawAPIRef.current.getSceneElementsIncludingDeleted() 
             : latestElementsRef.current;
@@ -344,20 +376,16 @@ export default function App() {
     }, 60);
   }, []);
 
-  // 合并远程元素，避免覆盖本地新增
   const mergeRemoteElements = (remoteElements, updatedAt) => {
     if (!excalidrawAPIRef.current) return;
     
-    // 【关键修复】必须包含本地已被删除的元素，否则对方同步时找不到旧元素会将其当作新元素复活
     const localElements = excalidrawAPIRef.current.getSceneElementsIncludingDeleted 
         ? excalidrawAPIRef.current.getSceneElementsIncludingDeleted() 
         : latestElementsRef.current || excalidrawAPIRef.current.getSceneElements();
 
     const mergedMap = new Map();
-    // 先放入所有本地元素
     localElements.forEach(el => mergedMap.set(el.id, el));
 
-    // 只应用版本更高的远程元素
     remoteElements.forEach(el => {
       const existing = mergedMap.get(el.id);
       if (!existing || el.version > existing.version) {
@@ -367,7 +395,6 @@ export default function App() {
 
     const mergedElements = Array.from(mergedMap.values());
 
-    // 如果与当前画布完全相同，跳过更新
     if (elementsAreEqual(localElements, mergedElements)) return;
 
     lastAppliedTimestampRef.current = updatedAt;
@@ -382,7 +409,6 @@ export default function App() {
     }, 60);
   };
 
-  // 元素相等性比较（仅 id + version）
   const elementsAreEqual = (a, b) => {
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) {
@@ -531,10 +557,8 @@ export default function App() {
     latestElementsRef.current = elements;
     hasUnsavedChangesRef.current = true;
 
-    // 广播：50ms 无操作后立即发送最终状态（撤销/擦除可快速同步）
     clearTimeout(broadcastTimer.current);
     broadcastTimer.current = setTimeout(() => {
-      // 【关键修复】直接使用回调中传入的完整 elements（包含了 isDeleted 的元素），而不是 getSceneElements()
       if (channelRef.current && isChannelReadyRef.current) {
         channelRef.current.send({
           type: 'broadcast',
@@ -548,7 +572,6 @@ export default function App() {
       pendingRemoteUpdateRef.current = null;
     }, 50);
 
-    // 数据库保存不变（低频持久化）
     clearTimeout(moveEndTimer.current);
     moveEndTimer.current = setTimeout(() => {
       if (hasUnsavedChangesRef.current) {
@@ -586,6 +609,19 @@ export default function App() {
     });
   };
 
+  const switchBoard = async (board) => {
+    if (currentBoard && hasUnsavedChangesRef.current) {
+      clearTimeout(saveTimer.current);
+      clearTimeout(moveEndTimer.current);
+      clearTimeout(broadcastTimer.current);
+      const elements = excalidrawAPIRef.current?.getSceneElements();
+      if (elements) {
+        await executeDBSave(elements, true);
+      }
+    }
+    setCurrentBoard(board);
+  };
+
   const handleCreateBoard = async () => {
     if (!userInfo.isLoggedIn) return alert("请先登录");
     const title = prompt("请输入新白板名称");
@@ -616,10 +652,28 @@ export default function App() {
     e.stopPropagation();
     if (board.owner !== userInfo.name) return alert("只能删除自己的白板");
     if (!window.confirm("确定删除该白板吗？")) return;
+
+    if (currentBoard?.id === board.id) {
+      const elements = excalidrawAPIRef.current?.getSceneElements();
+      if (elements && hasUnsavedChangesRef.current) {
+        await executeDBSave(elements, true);
+      }
+    }
     await supabase.from("whiteboards").delete().eq("id", board.id);
     if (currentBoard?.id === board.id) setCurrentBoard(null);
     await fetchBoards();
   };
+
+  // 提取在线用户名列表（去重）
+  const onlineUserNames = React.useMemo(() => {
+    const names = [];
+    onlineUsers.forEach((presence) => {
+      if (presence.name && !names.includes(presence.name)) {
+        names.push(presence.name);
+      }
+    });
+    return names;
+  }, [onlineUsers]);
 
   const toggleIcon = isSidebarOpen ? (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -632,8 +686,18 @@ export default function App() {
   );
 
   return (
-    <div className={`app-container ${isSidebarOpen ? "sidebar-open" : "sidebar-closed"}`}>
-      <div className={`sidebar ${isSidebarOpen ? "open" : "closed"}`}>
+    <div className="app-container">
+
+      {/* 侧边栏：桌面端宽度可调节，移动端固定宽度覆盖 */}
+      <div
+        className={`sidebar ${isSidebarOpen ? "open" : "closed"}`}
+        style={{
+          width: isSidebarOpen ? sidebarWidth : 0,
+          padding: isSidebarOpen ? "var(--space-xl) var(--space-lg)" : 0,
+          overflow: "hidden",
+          opacity: isSidebarOpen ? 1 : 0,
+        }}
+      >
         <div className="user-card">
           <div className="avatar">{userInfo.name.charAt(0)}</div>
           <div>
@@ -650,8 +714,8 @@ export default function App() {
         <div className="scroll-area hide-scrollbar">
           <div className="section-title">
             <span>我的私密白板</span>
-            <button 
-              className={`icon-btn ${!userInfo.isLoggedIn ? 'disabled' : ''}`}
+            <button
+              className={`icon-btn add-board-btn ${!userInfo.isLoggedIn ? "disabled" : ""}`}
               onClick={handleCreateBoard}
               disabled={!userInfo.isLoggedIn}
               title={userInfo.isLoggedIn ? "新建白板" : "请先登录"}
@@ -663,7 +727,7 @@ export default function App() {
             <div
               key={board.id}
               className={`board-item ${currentBoard?.id === board.id ? "active" : ""}`}
-              onClick={() => setCurrentBoard(board)}
+              onClick={() => switchBoard(board)}
             >
               <span className="board-title">{board.title}</span>
               <div className="action-buttons">
@@ -678,7 +742,7 @@ export default function App() {
             <div
               key={board.id}
               className={`board-item ${currentBoard?.id === board.id ? "public-active" : ""}`}
-              onClick={() => setCurrentBoard(board)}
+              onClick={() => switchBoard(board)}
             >
               <div className="board-meta">
                 <span className="board-title">{board.title}</span>
@@ -695,12 +759,13 @@ export default function App() {
             </div>
           ))}
         </div>
-
-        <div className="online-badge">
-          <span className="pulse-dot"></span> 房间内在线: {onlineUsers.size}
-        </div>
       </div>
 
+      {isSidebarOpen && (
+        <div className="resize-handle" onMouseDown={handleResizeStart} />
+      )}
+
+      {/* 主区域 */}
       <div className={`main-area ${isSidebarOpen ? "with-sidebar" : "without-sidebar"}`}>
         <div className="main-header">
           <button className="toggle-btn" onClick={() => setIsSidebarOpen(!isSidebarOpen)}>
@@ -710,9 +775,6 @@ export default function App() {
           <div className="board-info">
             <span className="board-info-title">{currentBoard?.title || "未选择白板"}</span>
             {currentBoard && <span className="tag">{currentBoard.is_public ? "公共" : "私密"}</span>}
-            <span className="save-status" style={{ color: isSaving ? "var(--color-warning)" : "var(--color-success)" }}>
-              {isSaving ? "云同步中..." : "已保存到云"}
-            </span>
           </div>
         </div>
 
@@ -720,7 +782,6 @@ export default function App() {
           <Excalidraw
             excalidrawAPI={(api) => {
               excalidrawAPIRef.current = api;
-              // 如果已有 currentBoard 且画布为空，主动加载
               if (currentBoard && api.getSceneElements().length === 0) {
                 loadBoardToCanvas(currentBoard);
               }

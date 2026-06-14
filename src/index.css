@@ -54,6 +54,8 @@ body {
   background-color: var(--color-bg);
   color: var(--color-text);
   line-height: 1.4;
+  margin: 0;
+  overflow: hidden; /* 防止页面滚动 */
 }
 
 /* ========== 工具类 ========== */
@@ -135,45 +137,40 @@ body {
   display: flex;
   height: 100vh;
   width: 100vw;
-  background-color: var(--color-bg);
+  background: var(--color-bg);
+  padding: 0 !important;
+  gap: 0 !important;
   overflow: hidden;
-  transition: padding var(--transition-normal), gap var(--transition-normal);
 }
 
-.app-container.sidebar-open {
-  padding: 14px;
-  gap: 14px;
-}
-
-.app-container.sidebar-closed {
-  padding: 0;
-  gap: 0;
-}
-
-/* ========== 侧边栏 ========== */
+/* 侧边栏：桌面端 width 由内联 style 控制，移动端绝对定位 */
 .sidebar {
   background: var(--color-surface);
-  border-radius: var(--radius-md);
   display: flex;
   flex-direction: column;
-  box-shadow: var(--shadow-lg);
-  overflow: hidden;
   white-space: nowrap;
-  transition: width var(--transition-normal),
-              opacity var(--transition-normal),
-              padding var(--transition-normal);
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+              padding 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.3s ease;
+  overflow: hidden;
+  z-index: 20;
+  border-right: 1px solid var(--color-border); /* 细微分割感，分隔线可覆盖 */
 }
 
-.sidebar.open {
-  width: 280px;
-  opacity: 1;
-  padding: var(--space-xl) var(--space-lg);
-}
 
-.sidebar.closed {
-  width: 0;
-  opacity: 0;
-  padding: 0;
+
+
+/* 可拖拽分隔线 */
+.resize-handle {
+  width: 2px;
+  cursor: col-resize;
+  background: var(--color-border);
+  transition: background 0.2s;
+  z-index: 10;
+  flex-shrink: 0;
+}
+.resize-handle:hover {
+  background: var(--color-primary);
 }
 
 /* 用户卡片 */
@@ -233,6 +230,22 @@ body {
 .section-title + .section-title {
   margin-top: 24px;
 }
+
+
+/* 新增：加号按钮变大美化 */
+.add-board-btn {
+  width: 32px;
+  height: 32px;
+  font-size: 20px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #4a9eff, #1a73e8);
+  box-shadow: 0 4px 8px rgba(26,115,232,0.3);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 
 /* 白板列表项 */
 .board-item {
@@ -367,26 +380,64 @@ body {
 }
 
 /* ========== 主区域 ========== */
+/* 主区域：去除所有圆角和阴影，完全填充 */
 .main-area {
   flex: 1;
-  background: var(--color-surface);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border-radius: var(--radius-md);
-  box-shadow: none;
-  transition: border-radius var(--transition-normal),
-              box-shadow var(--transition-normal);
-}
-
-.main-area.with-sidebar {
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
-}
-
-.main-area.without-sidebar {
+  background: var(--color-surface);
   border-radius: 0;
   box-shadow: none;
+}
+
+/* 顶部工具栏 */
+.main-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: 0 var(--space-lg);
+  height: 48px;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.toggle-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+/* 白板信息 */
+.board-info {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  height: 100%;
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+}
+.board-info-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+.tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: #e8f0fe;
+  color: var(--color-primary);
+  border-radius: var(--radius-xs);
+  font-weight: 600;
 }
 
 /* 顶部工具栏（不再遮挡画布） */
@@ -449,12 +500,6 @@ body {
   white-space: nowrap;
 }
 
-.save-status {
-  font-size: var(--font-size-sm);
-  margin-left: var(--space-sm);
-  white-space: nowrap;
-}
-
 /* ========== Excalidraw 容器 ========== */
 .excalidraw-wrapper {
   flex: 1;
@@ -463,44 +508,10 @@ body {
 }
 
 /* 隐藏右下角的帮助按钮 (问号图标) */
-.excalidraw .help-icon {
-  display: none !important;
-}
-
 /* 隐藏左上角或工具栏中的素材库 (Library) 按钮 */
+.excalidraw .help-icon,
 .excalidraw .layer-ui__wrapper .sidebar-trigger,
 .excalidraw button[aria-label="Shapes library"],
 .excalidraw button[aria-label="素材库"] {
   display: none !important;
-}
-
-
-/* ========== 响应式 ========== */
-@media (max-width: 1024px) {
-  .app-container.sidebar-open {
-    flex-direction: column;
-    padding: 8px;
-    gap: 8px;
-  }
-
-  .sidebar.open {
-    width: 100%;
-    height: auto;
-    max-height: 40vh;
-  }
-
-  .main-area {
-    border-radius: 0;
-    box-shadow: none;
-  }
-
-  .main-header {
-    padding: 0 var(--space-md);
-    height: 44px;
-    gap: var(--space-sm);
-  }
-
-  .board-info .board-info-title {
-    max-width: 120px;
-  }
 }
