@@ -58,6 +58,36 @@ export default function App() {
   // 广播防抖定时器
   const broadcastTimer = useRef(null);
 
+  useEffect(() => {
+    const forceSave = () => {
+      if (!hasUnsavedChangesRef.current || !currentBoard) return;
+      const elements = excalidrawAPIRef.current?.getSceneElements();
+      if (!elements) return;
+      const wrapped = { elements, senderId: userInfo.id };
+      // 使用 keepalive fetch 保证请求发出
+      fetch(`${SUPABASE_URL}/rest/v1/whiteboards?id=eq.${currentBoard.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          'Prefer': 'return=minimal',
+        },
+        body: JSON.stringify({ content: wrapped, updated_at: new Date().toISOString() }),
+        keepalive: true,
+      });
+    };
+    window.addEventListener('beforeunload', forceSave);
+    return () => {
+      window.removeEventListener('beforeunload', forceSave);
+      // 正常卸载时也异步保存
+      if (hasUnsavedChangesRef.current && currentBoard) {
+        const elements = excalidrawAPIRef.current?.getSceneElements();
+        if (elements) executeDBSave(elements, true);
+      }
+    };
+  }, [currentBoard, userInfo.id]);
+
   // 涟漪效果（含按下状态管理）
   useEffect(() => {
     const addPressed = (e) => {
@@ -180,6 +210,11 @@ export default function App() {
   useEffect(() => {
     if (!currentBoard?.id || !userInfo.id) return;
 
+    // 加载当前白板内容到画布
+    if (currentBoard && excalidrawAPIRef.current) {
+      loadBoardToCanvas(currentBoard);
+    }
+
     isChannelReadyRef.current = false;
     collaboratorsRef.current.clear();
     if (channelRef.current) supabase.removeChannel(channelRef.current);
@@ -292,6 +327,22 @@ export default function App() {
       }
     };
   }, [currentBoard?.id, userInfo.id]);
+
+
+  const loadBoardToCanvas = useCallback((board) => {
+    if (!excalidrawAPIRef.current || !board) return;
+    const parsed = parseContent(board.content);
+    const elements = parsed.elements;
+    lastAppliedTimestampRef.current = new Date(board.updated_at).getTime();
+    hasUnsavedChangesRef.current = false;
+    pendingRemoteUpdateRef.current = null;
+    latestElementsRef.current = structuredClone(elements);
+    isRemoteUpdatingRef.current = true;
+    excalidrawAPIRef.current.updateScene({ elements });
+    setTimeout(() => {
+      isRemoteUpdatingRef.current = false;
+    }, 60);
+  }, []);
 
   // 合并远程元素，避免覆盖本地新增
   const mergeRemoteElements = (remoteElements, updatedAt) => {
@@ -667,7 +718,13 @@ export default function App() {
 
         <div className="excalidraw-wrapper">
           <Excalidraw
-            excalidrawAPI={(api) => { excalidrawAPIRef.current = api; }}
+            excalidrawAPI={(api) => {
+              excalidrawAPIRef.current = api;
+              // 如果已有 currentBoard 且画布为空，主动加载
+              if (currentBoard && api.getSceneElements().length === 0) {
+                loadBoardToCanvas(currentBoard);
+              }
+            }}
             onChange={handleOnChange}
             onPointerUpdate={handlePointerUpdate}
             theme="light"
