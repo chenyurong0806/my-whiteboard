@@ -55,24 +55,42 @@ export default function App() {
 
   const animationFrameIdRef = useRef(null);
 
-  // 涟漪效果（同时处理 board-item 和按钮）
+  // 广播防抖定时器
+  const broadcastTimer = useRef(null);
+
+  // 涟漪效果（含按下状态管理）
   useEffect(() => {
+    const addPressed = (e) => {
+      const target = e.target.closest('.icon-btn, .text-btn, .toggle-btn, .board-item');
+      if (target) {
+        target.classList.add('pressed');
+        setTimeout(() => target.classList.remove('pressed'), 200);
+      }
+    };
+    const removePressed = (e) => {
+      const target = e.target.closest('.icon-btn, .text-btn, .toggle-btn, .board-item');
+      if (target) target.classList.remove('pressed');
+    };
+    const clearAllPressed = () => document.querySelectorAll('.pressed').forEach(el => el.classList.remove('pressed'));
+
+    document.addEventListener('mousedown', addPressed);
+    document.addEventListener('mouseup', removePressed);
+    document.addEventListener('mouseleave', clearAllPressed);
+
     const handleMouseDown = (e) => {
-      // 优先匹配按钮，再匹配列表项
       const btn = e.target.closest('.icon-btn, .text-btn, .toggle-btn');
       if (btn) {
-        // 按钮：按下时缓慢涟漪
         addRipple(e, btn, 'hold');
         return;
       }
       const boardItem = e.target.closest('.board-item');
       if (boardItem) {
-        // 列表项：按下时缓慢涟漪
         addRipple(e, boardItem, 'hold');
       }
     };
 
     const addRipple = (e, el, type) => {
+      el.querySelectorAll('.ripple').forEach(r => r.remove());
       const ripple = document.createElement('span');
       ripple.className = 'ripple';
       const rect = el.getBoundingClientRect();
@@ -81,54 +99,38 @@ export default function App() {
       ripple.style.left = `${e.clientX - rect.left - size / 2}px`;
       ripple.style.top = `${e.clientY - rect.top - size / 2}px`;
 
-      if (type === 'fast') {
-        ripple.classList.add('ripple-fast');
+      if (type === 'hold') {
+        ripple.classList.add('ripple-hold');
+        el._ripple = ripple;
         el.appendChild(ripple);
-        ripple.addEventListener('animationend', () => ripple.remove());
-        return;
+
+        const onRelease = () => {
+          if (!el._ripple) return;
+          const cr = el._ripple;
+          el._ripple = null;
+          const computed = getComputedStyle(cr);
+          const matrix = new DOMMatrixReadOnly(computed.transform);
+          const scale = matrix.a;
+          cr.style.setProperty('--ripple-current-scale', scale);
+          cr.classList.remove('ripple-hold');
+          cr.classList.add('ripple-release');
+          cr.addEventListener('animationend', () => cr.remove(), { once: true });
+          el.removeEventListener('mouseup', onRelease);
+          el.removeEventListener('mouseleave', onRelease);
+        };
+        el.addEventListener('mouseup', onRelease, { once: true });
+        el.addEventListener('mouseleave', onRelease, { once: true });
       }
-
-      // ---- 按钮长按处理 ----
-      ripple.classList.add('ripple-hold');
-      // 记录当前涟漪和宿主元素
-      el._ripple = ripple;       // 存储引用
-      el.appendChild(ripple);
-
-      // 监听松开和离开
-      const onRelease = (event) => {
-        // 避免重复触发
-        if (!el._ripple) return;
-        const currentRipple = el._ripple;
-        el._ripple = null;
-
-        // 获取当前涟漪的实际 scale（如果有）
-        const computedStyle = getComputedStyle(currentRipple);
-        const matrix = new WebKitCSSMatrix(computedStyle.transform);
-        const currentScale = matrix.a;   // 假设是均匀缩放
-
-        // 设置 CSS 变量，让释放动画从当前大小继续
-        currentRipple.style.setProperty('--ripple-current-scale', currentScale);
-
-        // 切换类名
-        currentRipple.classList.remove('ripple-hold');
-        currentRipple.classList.add('ripple-release');
-
-        // 动画结束后移除
-        currentRipple.addEventListener('animationend', () => {
-          currentRipple.remove();
-        }, { once: true });
-
-        // 移除本次监听
-        el.removeEventListener('mouseup', onRelease);
-        el.removeEventListener('mouseleave', onRelease);
-      };
-
-      el.addEventListener('mouseup', onRelease, { once: true });
-      el.addEventListener('mouseleave', onRelease, { once: true });
     };
 
     document.addEventListener('mousedown', handleMouseDown);
-    return () => document.removeEventListener('mousedown', handleMouseDown);
+
+    return () => {
+      document.removeEventListener('mousedown', addPressed);
+      document.removeEventListener('mouseup', removePressed);
+      document.removeEventListener('mouseleave', clearAllPressed);
+      document.removeEventListener('mousedown', handleMouseDown);
+    };
   }, []);
 
   // 初始化用户并拉取白板列表
@@ -169,17 +171,12 @@ export default function App() {
     setPrivateBoards(privateList);
 
     if (!currentBoard) {
-      const defaultBoard =
-        privateList.length > 0
-          ? privateList[0]
-          : publicList.length > 0
-          ? publicList[0]
-          : null;
+      const defaultBoard = privateList.length > 0 ? privateList[0] : (publicList.length > 0 ? publicList[0] : null);
       setCurrentBoard(defaultBoard);
     }
   };
 
-  // 实时协作频道（保持不变）
+  // 实时协作频道
   useEffect(() => {
     if (!currentBoard?.id || !userInfo.id) return;
 
@@ -192,6 +189,7 @@ export default function App() {
     }
     clearTimeout(saveTimer.current);
     clearTimeout(moveEndTimer.current);
+    clearTimeout(broadcastTimer.current);
 
     const channel = supabase.channel(`board_${currentBoard.id}`);
     channelRef.current = channel;
@@ -212,15 +210,7 @@ export default function App() {
           const remoteUpdatedAt = new Date(payload.new.updated_at).getTime();
           if (remoteUpdatedAt <= lastAppliedTimestampRef.current) return;
 
-          if (hasUnsavedChangesRef.current) {
-            pendingRemoteUpdateRef.current = {
-              elements: remoteContent.elements,
-              updatedAt: remoteUpdatedAt,
-            };
-            return;
-          }
-
-          applyRemoteUpdate(remoteContent.elements, remoteUpdatedAt);
+          lastAppliedTimestampRef.current = remoteUpdatedAt;
         }
       )
       .on("broadcast", { event: "pointer_update" }, ({ payload }) => {
@@ -246,6 +236,10 @@ export default function App() {
         collaboratorsRef.current.set(payload.userId, existing);
         scheduleCollaboratorsUpdate();
       })
+      .on("broadcast", { event: "element_update" }, ({ payload }) => {
+        if (payload.senderId === userInfo.id || !excalidrawAPIRef.current) return;
+        mergeRemoteElements(payload.elements, Date.now());
+      })
       .on("presence", { event: "sync" }, () => {
         const state = channel.presenceState();
         setOnlineUsers(new Map(Object.entries(state)));
@@ -270,18 +264,28 @@ export default function App() {
       });
 
     return () => {
-      if (
-        hasUnsavedChangesRef.current &&
-        currentBoard &&
-        latestElementsRef.current
-      ) {
-        executeDBSave(latestElementsRef.current);
-      }
+      // 强制保存未提交的更改
+      const trySaveUnsaved = () => {
+        if (!hasUnsavedChangesRef.current || !currentBoard) return;
+        
+        // 【关键修复】获取包括被删除的完整元素记录
+        const currentElements = excalidrawAPIRef.current?.getSceneElementsIncludingDeleted 
+            ? excalidrawAPIRef.current.getSceneElementsIncludingDeleted() 
+            : latestElementsRef.current;
+            
+        if (currentElements) {
+          executeDBSave(currentElements, true);
+        } else {
+          executeDBSave(latestElementsRef.current || [], true);
+        }
+      };
+      trySaveUnsaved();
 
       isChannelReadyRef.current = false;
       supabase.removeChannel(channel);
       clearTimeout(saveTimer.current);
       clearTimeout(moveEndTimer.current);
+      clearTimeout(broadcastTimer.current);
       if (animationFrameIdRef.current) {
         cancelAnimationFrame(animationFrameIdRef.current);
         animationFrameIdRef.current = null;
@@ -289,20 +293,51 @@ export default function App() {
     };
   }, [currentBoard?.id, userInfo.id]);
 
-  // 以下函数保持不变：applyRemoteUpdate, scheduleCollaboratorsUpdate, interpolateCollaborators, executeDBSave, handleOnChange, handlePointerUpdate, handleCreateBoard, handleTogglePublish, handleDeleteBoard
-
-  const applyRemoteUpdate = (elements, updatedAt) => {
+  // 合并远程元素，避免覆盖本地新增
+  const mergeRemoteElements = (remoteElements, updatedAt) => {
     if (!excalidrawAPIRef.current) return;
+    
+    // 【关键修复】必须包含本地已被删除的元素，否则对方同步时找不到旧元素会将其当作新元素复活
+    const localElements = excalidrawAPIRef.current.getSceneElementsIncludingDeleted 
+        ? excalidrawAPIRef.current.getSceneElementsIncludingDeleted() 
+        : latestElementsRef.current || excalidrawAPIRef.current.getSceneElements();
+
+    const mergedMap = new Map();
+    // 先放入所有本地元素
+    localElements.forEach(el => mergedMap.set(el.id, el));
+
+    // 只应用版本更高的远程元素
+    remoteElements.forEach(el => {
+      const existing = mergedMap.get(el.id);
+      if (!existing || el.version > existing.version) {
+        mergedMap.set(el.id, el);
+      }
+    });
+
+    const mergedElements = Array.from(mergedMap.values());
+
+    // 如果与当前画布完全相同，跳过更新
+    if (elementsAreEqual(localElements, mergedElements)) return;
+
     lastAppliedTimestampRef.current = updatedAt;
     isRemoteUpdatingRef.current = true;
     excalidrawAPIRef.current.updateScene({
-      elements,
+      elements: mergedElements,
       commitToHistory: false,
     });
-    latestElementsRef.current = structuredClone(elements);
+    latestElementsRef.current = structuredClone(mergedElements);
     setTimeout(() => {
       isRemoteUpdatingRef.current = false;
     }, 60);
+  };
+
+  // 元素相等性比较（仅 id + version）
+  const elementsAreEqual = (a, b) => {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i].id !== b[i].id || a[i].version !== b[i].version) return false;
+    }
+    return true;
   };
 
   const scheduleCollaboratorsUpdate = useCallback(() => {
@@ -374,8 +409,9 @@ export default function App() {
     return anyMoving;
   };
 
-  const executeDBSave = async (elements) => {
-    if (!currentBoard || isRemoteUpdatingRef.current || !excalidrawAPIRef.current) return;
+  const executeDBSave = async (elements, force = false) => {
+    if (!currentBoard) return;
+    if (!force && (isRemoteUpdatingRef.current || !excalidrawAPIRef.current)) return;
 
     if (!currentBoard.is_public && currentBoard.owner !== userInfo.name) {
       console.warn("⛔ 你没有权限修改此私有白板");
@@ -384,11 +420,18 @@ export default function App() {
       return;
     }
 
+    if (isSavingRef.current) {
+      pendingSaveElementsRef.current = elements;
+      return;
+    }
+
+    const elementsToSave = structuredClone(elements);
+
     isSavingRef.current = true;
     setIsSaving(true);
 
     const wrappedPayload = {
-      elements: elements,
+      elements: elementsToSave,
       senderId: userInfo.id,
     };
 
@@ -412,7 +455,7 @@ export default function App() {
         const pending = pendingRemoteUpdateRef.current;
         pendingRemoteUpdateRef.current = null;
         if (pending.updatedAt > lastAppliedTimestampRef.current) {
-          applyRemoteUpdate(pending.elements, pending.updatedAt);
+          mergeRemoteElements(pending.elements, pending.updatedAt);
         }
       }
     } catch (e) {
@@ -424,7 +467,9 @@ export default function App() {
       if (pendingSaveElementsRef.current) {
         const pending = pendingSaveElementsRef.current;
         pendingSaveElementsRef.current = null;
-        executeDBSave(pending);
+        if (pending !== elementsToSave) {
+          executeDBSave(pending);
+        }
       }
     }
   };
@@ -432,32 +477,41 @@ export default function App() {
   const handleOnChange = (elements) => {
     if (!currentBoard || isRemoteUpdatingRef.current) return;
 
-    if (
-      latestElementsRef.current &&
-      JSON.stringify(elements) === JSON.stringify(latestElementsRef.current)
-    ) {
-      return;
-    }
-
-    latestElementsRef.current = structuredClone(elements);
+    latestElementsRef.current = elements;
     hasUnsavedChangesRef.current = true;
 
+    // 广播：50ms 无操作后立即发送最终状态（撤销/擦除可快速同步）
+    clearTimeout(broadcastTimer.current);
+    broadcastTimer.current = setTimeout(() => {
+      // 【关键修复】直接使用回调中传入的完整 elements（包含了 isDeleted 的元素），而不是 getSceneElements()
+      if (channelRef.current && isChannelReadyRef.current) {
+        channelRef.current.send({
+          type: 'broadcast',
+          event: 'element_update',
+          payload: {
+            elements: elements, 
+            senderId: userInfo.id,
+          },
+        });
+      }
+      pendingRemoteUpdateRef.current = null;
+    }, 50);
+
+    // 数据库保存不变（低频持久化）
     clearTimeout(moveEndTimer.current);
     moveEndTimer.current = setTimeout(() => {
-      if (hasUnsavedChangesRef.current && !isSavingRef.current) {
+      if (hasUnsavedChangesRef.current) {
         clearTimeout(saveTimer.current);
         executeDBSave(elements);
       }
-    }, 300);
+    }, 800);
 
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      if (isSavingRef.current) {
-        pendingSaveElementsRef.current = elements;
-      } else {
+      if (hasUnsavedChangesRef.current && !isSavingRef.current) {
         executeDBSave(elements);
       }
-    }, 800);
+    }, 2000);
   };
 
   const handlePointerUpdate = (payload) => {
@@ -528,7 +582,6 @@ export default function App() {
 
   return (
     <div className={`app-container ${isSidebarOpen ? "sidebar-open" : "sidebar-closed"}`}>
-      {/* 侧边栏 */}
       <div className={`sidebar ${isSidebarOpen ? "open" : "closed"}`}>
         <div className="user-card">
           <div className="avatar">{userInfo.name.charAt(0)}</div>
@@ -536,11 +589,7 @@ export default function App() {
             <div className="user-name">{userInfo.name}</div>
             <div
               className="user-status"
-              style={{
-                color: userInfo.isLoggedIn
-                  ? "var(--color-success)"
-                  : "var(--color-text-muted)",
-              }}
+              style={{ color: userInfo.isLoggedIn ? "var(--color-success)" : "var(--color-text-muted)" }}
             >
               ● {userInfo.isLoggedIn ? "已登录" : "访客模式"}
             </div>
@@ -550,7 +599,6 @@ export default function App() {
         <div className="scroll-area hide-scrollbar">
           <div className="section-title">
             <span>我的私密白板</span>
-            {/* 确保按钮始终渲染，只是未登录时不可点击 */}
             <button 
               className={`icon-btn ${!userInfo.isLoggedIn ? 'disabled' : ''}`}
               onClick={handleCreateBoard}
@@ -563,25 +611,13 @@ export default function App() {
           {privateBoards.map((board) => (
             <div
               key={board.id}
-              className={`board-item ${
-                currentBoard?.id === board.id ? "active" : ""
-              }`}
+              className={`board-item ${currentBoard?.id === board.id ? "active" : ""}`}
               onClick={() => setCurrentBoard(board)}
             >
               <span className="board-title">{board.title}</span>
               <div className="action-buttons">
-                <button
-                  className="text-btn primary"
-                  onClick={(e) => handleTogglePublish(board, e)}
-                >
-                  公开
-                </button>
-                <button
-                  className="text-btn danger"
-                  onClick={(e) => handleDeleteBoard(board, e)}
-                >
-                  删
-                </button>
+                <button className="text-btn primary" onClick={(e) => handleTogglePublish(board, e)}>公开</button>
+                <button className="text-btn danger" onClick={(e) => handleDeleteBoard(board, e)}>删</button>
               </div>
             </div>
           ))}
@@ -590,9 +626,7 @@ export default function App() {
           {publicBoards.map((board) => (
             <div
               key={board.id}
-              className={`board-item ${
-                currentBoard?.id === board.id ? "public-active" : ""
-              }`}
+              className={`board-item ${currentBoard?.id === board.id ? "public-active" : ""}`}
               onClick={() => setCurrentBoard(board)}
             >
               <div className="board-meta">
@@ -602,18 +636,8 @@ export default function App() {
               <div className="action-buttons">
                 {board.owner === userInfo.name && (
                   <>
-                    <button
-                      className="text-btn warning"
-                      onClick={(e) => handleTogglePublish(board, e)}
-                    >
-                      私有
-                    </button>
-                    <button
-                      className="text-btn danger"
-                      onClick={(e) => handleDeleteBoard(board, e)}
-                    >
-                      删
-                    </button>
+                    <button className="text-btn warning" onClick={(e) => handleTogglePublish(board, e)}>私有</button>
+                    <button className="text-btn danger" onClick={(e) => handleDeleteBoard(board, e)}>删</button>
                   </>
                 )}
               </div>
@@ -626,33 +650,16 @@ export default function App() {
         </div>
       </div>
 
-      {/* 主区域 */}
       <div className={`main-area ${isSidebarOpen ? "with-sidebar" : "without-sidebar"}`}>
         <div className="main-header">
-          <button
-            className="toggle-btn"
-            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-          >
+          <button className="toggle-btn" onClick={() => setIsSidebarOpen(!isSidebarOpen)}>
             {toggleIcon}
           </button>
 
           <div className="board-info">
-            <span className="board-info-title">
-              {currentBoard?.title || "未选择白板"}
-            </span>
-            {currentBoard && (
-              <span className="tag">
-                {currentBoard.is_public ? "公共" : "私密"}
-              </span>
-            )}
-            <span
-              className="save-status"
-              style={{
-                color: isSaving
-                  ? "var(--color-warning)"
-                  : "var(--color-success)",
-              }}
-            >
+            <span className="board-info-title">{currentBoard?.title || "未选择白板"}</span>
+            {currentBoard && <span className="tag">{currentBoard.is_public ? "公共" : "私密"}</span>}
+            <span className="save-status" style={{ color: isSaving ? "var(--color-warning)" : "var(--color-success)" }}>
               {isSaving ? "云同步中..." : "已保存到云"}
             </span>
           </div>
@@ -660,20 +667,11 @@ export default function App() {
 
         <div className="excalidraw-wrapper">
           <Excalidraw
-            excalidrawAPI={(api) => {
-              excalidrawAPIRef.current = api;
-            }}
+            excalidrawAPI={(api) => { excalidrawAPIRef.current = api; }}
             onChange={handleOnChange}
             onPointerUpdate={handlePointerUpdate}
             theme="light"
-            UIOptions={{ 
-              canvasActions: { 
-                toggleTheme: false, // 禁用主题切换
-                loadScene: false    // 如果不需要隐藏素材库库，可不加，隐藏 library 和 help 看下方
-              },
-              dockedSidebarTrigger: false, // 隐藏左侧的素材库（library）触发按钮
-              welcomeScreen: false         // 隐藏欢迎屏幕
-            }}
+            UIOptions={{ canvasActions: { toggleTheme: false, export: false, loadScene: false, saveAsImage: false, help: false, library: false } }}
           />
         </div>
       </div>
