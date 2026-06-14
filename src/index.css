@@ -1,49 +1,506 @@
-/* src/index.css */
-
+/* ========== CSS 变量与全局重置 ========== */
 :root {
+  --color-primary: #1a73e8;
+  --color-primary-hover: #1557b0;
+  --color-success: #34a853;
+  --color-warning: #f29900;
+  --color-error: #d93025;
+  --color-text: #202124;
+  --color-text-secondary: #5f6368;
+  --color-text-muted: #80868b;
+  --color-border: #dadce0;
+  --color-bg: #f8f9fa;
+  --color-surface: #ffffff;
+  --color-surface-hover: #f1f3f4;
+  --color-online-bg: #e6f4ea;
+  --color-online-text: #137333;
 
-  /* MD3 橙色主题色系 */
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.12);
+  --shadow-lg: 0 4px 24px rgba(0, 0, 0, 0.06);
 
-  --md-sys-color-primary: #E65100;
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 16px;
+  --radius-round: 50%;
 
-  --md-sys-color-primary-container: #FFCC80;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 20px;
+  --space-2xl: 32px;
 
-  --md-sys-color-on-primary-container: #4E1800;
+  --transition-fast: 0.2s ease;
+  --transition-normal: 0.3s ease;
 
-  --md-sys-color-surface: #F8F9FA;
-
-  --md-sys-color-surface-container: #FFFFFF;
-
-  --md-sys-color-outline: #E0E0E0;
-
+  --font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-md: 13px;
+  --font-size-lg: 16px;
 }
 
-
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
 
 body {
+  font-family: var(--font-family);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  line-height: 1.4;
+}
 
-  margin: 0;
+/* ========== 工具类 ========== */
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
 
+/* ========== 涟漪效果 ========== */
+.icon-btn,
+.text-btn,
+.toggle-btn,
+.board-item {
+  position: relative;
+  overflow: hidden;
+}
+
+.ripple {
+  position: absolute;
+  border-radius: 50%;
+  transform: scale(0);
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.25);  /* 提高透明度 → 颜色更实在 */
+  animation-fill-mode: forwards;
+}
+
+/* 快速动画（如果你还保留快速点击） */
+.ripple-fast {
+  animation: ripple-fast-anim 0.8s cubic-bezier(0.25, 0.1, 0.25, 1);  /* 速度更平缓 */
+}
+
+@keyframes ripple-fast-anim {
+  0% {
+    transform: scale(0);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(3);
+    opacity: 0;
+  }
+}
+
+/* 按住时缓慢扩大并维持（透明度提高） */
+.ripple-hold {
+  animation: ripple-hold-anim 1s cubic-bezier(0.2, 0, 0.5, 1) forwards;
+}
+
+@keyframes ripple-hold-anim {
+  0% {
+    transform: scale(0);
+    opacity: 0.45;
+  }
+  100% {
+    transform: scale(2.2);
+    opacity: 0.25;   /* 按住时保持更明显的颜色 */
+  }
+}
+
+/* 松开后扩散变慢 */
+.ripple-release {
+  animation: ripple-release-anim 1.2s cubic-bezier(0.25, 0.1, 0.25, 1) forwards;
+}
+
+@keyframes ripple-release-anim {
+  0% {
+    transform: scale(var(--ripple-current-scale, 2.2));
+    opacity: 0.25;
+  }
+  100% {
+    transform: scale(4);
+    opacity: 0;
+  }
+}
+/* ========== 主布局 ========== */
+.app-container {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  background-color: var(--color-bg);
+  overflow: hidden;
+  transition: padding var(--transition-normal), gap var(--transition-normal);
+}
+
+.app-container.sidebar-open {
+  padding: 14px;
+  gap: 14px;
+}
+
+.app-container.sidebar-closed {
   padding: 0;
+  gap: 0;
+}
 
-  background-color: var(--md-sys-color-surface);
+/* ========== 侧边栏 ========== */
+.sidebar {
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  white-space: nowrap;
+  transition: width var(--transition-normal),
+              opacity var(--transition-normal),
+              padding var(--transition-normal);
+}
 
-  font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+.sidebar.open {
+  width: 280px;
+  opacity: 1;
+  padding: var(--space-xl) var(--space-lg);
+}
 
-  color: #1F1F1F;
+.sidebar.closed {
+  width: 0;
+  opacity: 0;
+  padding: 0;
+}
 
+/* 用户卡片 */
+.user-card {
+  display: flex;
+  gap: var(--space-md);
+  align-items: center;
+  margin-bottom: var(--space-xl);
+  padding-bottom: var(--space-lg);
+  border-bottom: 1px solid #e8eaed;
+}
+
+.avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-round);
+  background-color: var(--color-primary);
+  color: white;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: var(--font-size-lg);
+  font-weight: bold;
+}
+
+.user-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--color-text);
+}
+
+.user-status {
+  font-size: var(--font-size-xs);
+  margin-top: var(--space-xs);
+  font-weight: 600;
+}
+
+/* 滚动区域 */
+.scroll-area {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* 版块标题 */
+.section-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  margin-bottom: var(--space-md);
+  letter-spacing: 0.3px;
+  min-height: 28px; /* 确保按钮有足够空间 */
+}
+
+.section-title + .section-title {
+  margin-top: 24px;
+}
+
+/* 白板列表项 */
+.board-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px var(--space-md);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  background: var(--color-surface);
+  margin-bottom: var(--space-sm);
+  border: 1px solid transparent;
+  transition: all var(--transition-fast);
+}
+
+.board-item:hover {
+  background: var(--color-surface-hover);
+}
+
+.board-item.active {
+  border-color: var(--color-primary);
+}
+
+.board-item.public-active {
+  border-color: var(--color-success);
+}
+
+.board-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--font-size-md);
+  color: #3c4043;
+  font-weight: 500;
+  max-width: 100px;
+}
+
+.owner-tag {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+
+.board-meta {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 操作按钮组 */
+.action-buttons {
+  display: flex;
+  gap: 2px;
+}
+
+/* 圆形按钮 */
+.icon-btn {
+  border-radius: var(--radius-round);
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: var(--color-primary);
+  color: white;
+  cursor: pointer;
+  font-size: var(--font-size-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 4px rgba(26, 115, 232, 0.2);
+  transition: background var(--transition-fast);
+  flex-shrink: 0;  /* 防止被挤压 */
+}
+
+.icon-btn:hover {
+  background: var(--color-primary-hover);
+}
+
+.icon-btn.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: var(--color-text-muted);
+  box-shadow: none;
+}
+
+/* 文字按钮 */
+.text-btn {
+  font-size: var(--font-size-xs);
+  padding: var(--space-xs) 6px;
+  border-radius: var(--radius-xs);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-weight: 600;
+  transition: background var(--transition-fast);
+}
+
+.text-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.text-btn.primary {
+  color: var(--color-primary);
+}
+
+.text-btn.warning {
+  color: var(--color-warning);
+}
+
+.text-btn.danger {
+  color: var(--color-error);
+}
+
+/* 在线状态栏 */
+.online-badge {
+  margin-top: var(--space-lg);
+  padding: 10px;
+  background: var(--color-online-bg);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  color: var(--color-online-text);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-weight: 600;
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  background-color: var(--color-success);
+  border-radius: var(--radius-round);
+}
+
+/* ========== 主区域 ========== */
+.main-area {
+  flex: 1;
+  background: var(--color-surface);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  box-shadow: none;
+  transition: border-radius var(--transition-normal),
+              box-shadow var(--transition-normal);
+}
+
+.main-area.with-sidebar {
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+}
+
+.main-area.without-sidebar {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* 顶部工具栏（不再遮挡画布） */
+.main-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: 0 var(--space-lg);
+  height: 48px;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  box-shadow: var(--shadow-sm);
+  z-index: 5;
+}
+
+.toggle-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  transition: background var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.toggle-btn:hover {
+  background: var(--color-surface-hover);
+}
+
+.board-info {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  height: 100%;
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+  overflow: hidden;
+}
+
+.board-info .board-info-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.board-info .tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: #e8f0fe;
+  color: var(--color-primary);
+  border-radius: var(--radius-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.save-status {
+  font-size: var(--font-size-sm);
+  margin-left: var(--space-sm);
+  white-space: nowrap;
+}
+
+/* ========== Excalidraw 容器 ========== */
+.excalidraw-wrapper {
+  flex: 1;
+  overflow: hidden;
+  background: var(--color-surface);
+}
+
+/* 隐藏右下角的帮助按钮 (问号图标) */
+.excalidraw .help-icon {
+  display: none !important;
+}
+
+/* 隐藏左上角或工具栏中的素材库 (Library) 按钮 */
+.excalidraw .layer-ui__wrapper .sidebar-trigger,
+.excalidraw button[aria-label="Shapes library"],
+.excalidraw button[aria-label="素材库"] {
+  display: none !important;
 }
 
 
+/* ========== 响应式 ========== */
+@media (max-width: 1024px) {
+  .app-container.sidebar-open {
+    flex-direction: column;
+    padding: 8px;
+    gap: 8px;
+  }
 
-/* 隐藏 Excalidraw 默认的某些不必要的全屏背景 */
+  .sidebar.open {
+    width: 100%;
+    height: auto;
+    max-height: 40vh;
+  }
 
-.excalidraw-wrapper {
+  .main-area {
+    border-radius: 0;
+    box-shadow: none;
+  }
 
-  border-radius: 24px;
+  .main-header {
+    padding: 0 var(--space-md);
+    height: 44px;
+    gap: var(--space-sm);
+  }
 
-  overflow: hidden;
-
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-
+  .board-info .board-info-title {
+    max-width: 120px;
+  }
 }
