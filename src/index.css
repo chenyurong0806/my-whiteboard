@@ -1,0 +1,49 @@
+/* src/index.css */
+
+:root {
+
+  /* MD3 橙色主题色系 */
+
+  --md-sys-color-primary: #E65100;
+
+  --md-sys-color-primary-container: #FFCC80;
+
+  --md-sys-color-on-primary-container: #4E1800;
+
+  --md-sys-color-surface: #F8F9FA;
+
+  --md-sys-color-surface-container: #FFFFFF;
+
+  --md-sys-color-outline: #E0E0E0;
+
+}
+
+
+
+body {
+
+  margin: 0;
+
+  padding: 0;
+
+  background-color: var(--md-sys-color-surface);
+
+  font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+
+  color: #1F1F1F;
+
+}
+
+
+
+/* 隐藏 Excalidraw 默认的某些不必要的全屏背景 */
+
+.excalidraw-wrapper {
+
+  border-radius: 24px;
+
+  overflow: hidden;
+
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+
+}
