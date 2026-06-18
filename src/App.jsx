@@ -194,7 +194,7 @@ export default function App() {
   useEffect(() => {
     const initUser = async () => {
       const randomId = Math.random().toString(36).substring(2, 10);
-      const IS_DEV_LOGIN = true; 
+      const IS_DEV_LOGIN = false; 
       if (IS_DEV_LOGIN) {
         const mockUsername = "本地调试员"; 
         setUserInfo({ id: randomId, name: mockUsername, isLoggedIn: true });
