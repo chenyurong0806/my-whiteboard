@@ -32,9 +32,8 @@ export default function App() {
   const [currentBoard, setCurrentBoard] = useState(null);
   const [onlineUsers, setOnlineUsers] = useState(new Map());
   const [isSaving, setIsSaving] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false); // 移动端默认关闭
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false); 
 
-  // 侧边栏宽度（桌面端）
   const [sidebarWidth, setSidebarWidth] = useState(280);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 1024);
   const isResizing = useRef(false);
@@ -59,11 +58,8 @@ export default function App() {
   const pendingRemoteUpdateRef = useRef(null);
 
   const animationFrameIdRef = useRef(null);
-
-  // 广播防抖定时器
   const broadcastTimer = useRef(null);
 
-  // 拖拽分隔线逻辑
   const handleResizeStart = (e) => {
     e.preventDefault();
     isResizing.current = true;
@@ -99,7 +95,6 @@ export default function App() {
       const elements = excalidrawAPIRef.current?.getSceneElements();
       if (!elements) return;
       const wrapped = { elements, senderId: userInfo.id };
-      // 使用 keepalive fetch 保证请求发出
       fetch(`${SUPABASE_URL}/rest/v1/whiteboards?id=eq.${currentBoard.id}`, {
         method: 'PATCH',
         headers: {
@@ -122,7 +117,6 @@ export default function App() {
     };
   }, [currentBoard, userInfo.id]);
 
-  // 涟漪效果（含按下状态管理）
   useEffect(() => {
     const addPressed = (e) => {
       const target = e.target.closest('.icon-btn, .text-btn, .toggle-btn, .board-item');
@@ -197,10 +191,17 @@ export default function App() {
     };
   }, []);
 
-  // 初始化用户并拉取白板列表
   useEffect(() => {
     const initUser = async () => {
       const randomId = Math.random().toString(36).substring(2, 10);
+      const IS_DEV_LOGIN = true; 
+      if (IS_DEV_LOGIN) {
+        const mockUsername = "本地调试员"; 
+        setUserInfo({ id: randomId, name: mockUsername, isLoggedIn: true });
+        await fetchBoards(mockUsername);
+        return; 
+      }
+      
       try {
         const res = await fetch("/api/userinfo");
         if (res.ok) {
@@ -240,11 +241,9 @@ export default function App() {
     }
   };
 
-  // 实时协作频道
   useEffect(() => {
     if (!currentBoard?.id || !userInfo.id) return;
 
-    // 加载当前白板内容到画布
     if (currentBoard && excalidrawAPIRef.current) {
       loadBoardToCanvas(currentBoard);
     }
@@ -288,10 +287,7 @@ export default function App() {
         const existing = collaboratorsRef.current.get(payload.userId) || {};
         const now = performance.now();
 
-        const targetPointer = {
-          x: payload.pointer.x,
-          y: payload.pointer.y,
-        };
+        const targetPointer = { x: payload.pointer.x, y: payload.pointer.y };
 
         if (!existing.displayPointer) {
           existing.displayPointer = { ...targetPointer };
@@ -328,18 +324,16 @@ export default function App() {
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
           isChannelReadyRef.current = true;
-          await channel.track({ name: userInfo.name });
+          await channel.track({ name: userInfo.name, currentBoardId: currentBoard.id });
         }
       });
 
     return () => {
       const trySaveUnsaved = () => {
         if (!hasUnsavedChangesRef.current || !currentBoard) return;
-        
         const currentElements = excalidrawAPIRef.current?.getSceneElementsIncludingDeleted 
             ? excalidrawAPIRef.current.getSceneElementsIncludingDeleted() 
             : latestElementsRef.current;
-            
         if (currentElements) {
           executeDBSave(currentElements, true);
         } else {
@@ -360,7 +354,6 @@ export default function App() {
     };
   }, [currentBoard?.id, userInfo.id]);
 
-
   const loadBoardToCanvas = useCallback((board) => {
     if (!excalidrawAPIRef.current || !board) return;
     const parsed = parseContent(board.content);
@@ -378,7 +371,6 @@ export default function App() {
 
   const mergeRemoteElements = (remoteElements, updatedAt) => {
     if (!excalidrawAPIRef.current) return;
-    
     const localElements = excalidrawAPIRef.current.getSceneElementsIncludingDeleted 
         ? excalidrawAPIRef.current.getSceneElementsIncludingDeleted() 
         : latestElementsRef.current || excalidrawAPIRef.current.getSceneElements();
@@ -394,7 +386,6 @@ export default function App() {
     });
 
     const mergedElements = Array.from(mergedMap.values());
-
     if (elementsAreEqual(localElements, mergedElements)) return;
 
     lastAppliedTimestampRef.current = updatedAt;
@@ -430,7 +421,6 @@ export default function App() {
 
   const interpolateCollaborators = () => {
     if (!excalidrawAPIRef.current) return false;
-
     const now = performance.now();
     let anyMoving = false;
     const renderMap = new Map();
@@ -470,7 +460,6 @@ export default function App() {
       }
 
       data.lastFrameTime = now;
-
       renderMap.set(userId, {
         pointer: data.displayPointer,
         button: button || "up",
@@ -479,10 +468,7 @@ export default function App() {
       });
     }
 
-    excalidrawAPIRef.current.updateScene({
-      collaborators: renderMap,
-    });
-
+    excalidrawAPIRef.current.updateScene({ collaborators: renderMap });
     return anyMoving;
   };
 
@@ -503,14 +489,10 @@ export default function App() {
     }
 
     const elementsToSave = structuredClone(elements);
-
     isSavingRef.current = true;
     setIsSaving(true);
 
-    const wrappedPayload = {
-      elements: elementsToSave,
-      senderId: userInfo.id,
-    };
+    const wrappedPayload = { elements: elementsToSave, senderId: userInfo.id };
 
     try {
       const { data, error } = await supabase
@@ -563,10 +545,7 @@ export default function App() {
         channelRef.current.send({
           type: 'broadcast',
           event: 'element_update',
-          payload: {
-            elements: elements, 
-            senderId: userInfo.id,
-          },
+          payload: { elements: elements, senderId: userInfo.id },
         });
       }
       pendingRemoteUpdateRef.current = null;
@@ -590,12 +569,10 @@ export default function App() {
 
   const handlePointerUpdate = (payload) => {
     if (!channelRef.current || !isChannelReadyRef.current) return;
-
     const now = Date.now();
     if (now - lastPointerSendTimeRef.current < 20) return;
 
     lastPointerSendTimeRef.current = now;
-
     channelRef.current.send({
       type: "broadcast",
       event: "pointer_update",
@@ -664,16 +641,33 @@ export default function App() {
     await fetchBoards();
   };
 
-  // 提取在线用户名列表（去重）
-  const onlineUserNames = React.useMemo(() => {
-    const names = [];
-    onlineUsers.forEach((presence) => {
-      if (presence.name && !names.includes(presence.name)) {
-        names.push(presence.name);
+  // 1. 获取当前所有在线用户的去重列表（用于 main-header 渲染头像）
+  const uniqueOnlineUsers = React.useMemo(() => {
+    const list = [];
+    const seenNames = new Set();
+    onlineUsers.forEach((presenceArray) => {
+      if (Array.isArray(presenceArray)) {
+        presenceArray.forEach(p => {
+          if (p.name && !seenNames.has(p.name)) {
+            seenNames.add(p.name);
+            list.push({ name: p.name, boardId: p.currentBoardId });
+          }
+        });
+      } else if (presenceArray && presenceArray.name) {
+        if (!seenNames.has(presenceArray.name)) {
+          seenNames.add(presenceArray.name);
+          list.push({ name: presenceArray.name, boardId: presenceArray.currentBoardId });
+        }
       }
     });
-    return names;
+    return list;
   }, [onlineUsers]);
+
+  // 2. 辅助函数：判断某个 whiteboard 是否有其他人在看
+  const getBoardOnlineCount = useCallback((boardId) => {
+    // 过滤出处于该白板，且不等于当前用户自己的人数
+    return uniqueOnlineUsers.filter(u => u.boardId === boardId && u.name !== userInfo.name).length;
+  }, [uniqueOnlineUsers, userInfo.name]);
 
   const toggleIcon = isSidebarOpen ? (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -687,8 +681,6 @@ export default function App() {
 
   return (
     <div className="app-container">
-
-      {/* 侧边栏：桌面端宽度可调节，移动端固定宽度覆盖 */}
       <div
         className={`sidebar ${isSidebarOpen ? "open" : "closed"}`}
         style={{
@@ -723,41 +715,57 @@ export default function App() {
               +
             </button>
           </div>
-          {privateBoards.map((board) => (
-            <div
-              key={board.id}
-              className={`board-item ${currentBoard?.id === board.id ? "active" : ""}`}
-              onClick={() => switchBoard(board)}
-            >
-              <span className="board-title">{board.title}</span>
-              <div className="action-buttons">
-                <button className="text-btn primary" onClick={(e) => handleTogglePublish(board, e)}>公开</button>
-                <button className="text-btn danger" onClick={(e) => handleDeleteBoard(board, e)}>删</button>
+          {privateBoards.map((board) => {
+            const onlineCount = getBoardOnlineCount(board.id);
+            return (
+              <div
+                key={board.id}
+                className={`board-item ${currentBoard?.id === board.id ? "active" : ""}`}
+                onClick={() => switchBoard(board)}
+              >
+                <div className="board-meta">
+                  <span className="board-title">{board.title}</span>
+                  {onlineCount > 0 && (
+                    <span className="board-online-tag">● {onlineCount} 人在线</span>
+                  )}
+                </div>
+                <div className="action-buttons">
+                  <button className="text-btn btn-primary-lite" onClick={(e) => handleTogglePublish(board, e)}>公开</button>
+                  <button className="text-btn btn-danger-lite" onClick={(e) => handleDeleteBoard(board, e)}>删</button>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           <div className="section-title">🌐 公共大厅</div>
-          {publicBoards.map((board) => (
-            <div
-              key={board.id}
-              className={`board-item ${currentBoard?.id === board.id ? "public-active" : ""}`}
-              onClick={() => switchBoard(board)}
-            >
-              <div className="board-meta">
-                <span className="board-title">{board.title}</span>
-                <span className="owner-tag">by {board.owner}</span>
+          {publicBoards.map((board) => {
+            const onlineCount = getBoardOnlineCount(board.id);
+            return (
+              <div
+                key={board.id}
+                className={`board-item ${currentBoard?.id === board.id ? "public-active" : ""}`}
+                onClick={() => switchBoard(board)}
+              >
+                <div className="board-meta">
+                  <span className="board-title">{board.title}</span>
+                  <span className="owner-tag">by {board.owner}</span>
+                  {onlineCount > 0 && (
+                    <span className="board-online-tag">● {onlineCount} 人在线</span>
+                  )}
+                </div>
+                <div className="action-buttons">
+                  {board.owner === userInfo.name ? (
+                    <>
+                      <button className="text-btn btn-warning-lite" onClick={(e) => handleTogglePublish(board, e)}>私有</button>
+                      <button className="text-btn btn-danger-lite" onClick={(e) => handleDeleteBoard(board, e)}>删</button>
+                    </>
+                  ) : (
+                    <span className="visitor-badge">只读/协同</span>
+                  )}
+                </div>
               </div>
-              <div className="action-buttons">
-                {board.owner === userInfo.name && (
-                  <>
-                    <button className="text-btn warning" onClick={(e) => handleTogglePublish(board, e)}>私有</button>
-                    <button className="text-btn danger" onClick={(e) => handleDeleteBoard(board, e)}>删</button>
-                  </>
-                )}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
@@ -765,16 +773,40 @@ export default function App() {
         <div className="resize-handle" onMouseDown={handleResizeStart} />
       )}
 
-      {/* 主区域 */}
       <div className={`main-area ${isSidebarOpen ? "with-sidebar" : "without-sidebar"}`}>
         <div className="main-header">
-          <button className="toggle-btn" onClick={() => setIsSidebarOpen(!isSidebarOpen)}>
-            {toggleIcon}
-          </button>
+          <div className="main-header-left">
+            <button className="toggle-btn" onClick={() => setIsSidebarOpen(!isSidebarOpen)}>
+              {toggleIcon}
+            </button>
+            <div className="board-info">
+              <span className="board-info-title">{currentBoard?.title || "未选择白板"}</span>
+              {currentBoard && <span className="tag">{currentBoard.is_public ? "公共" : "私密"}</span>}
+              {isSaving && <span className="save-status-tag">正在同步...</span>}
+            </div>
+          </div>
 
-          <div className="board-info">
-            <span className="board-info-title">{currentBoard?.title || "未选择白板"}</span>
-            {currentBoard && <span className="tag">{currentBoard.is_public ? "公共" : "私密"}</span>}
+          {/* 新增：右侧协同头像状态栏 */}
+          <div className="main-header-right">
+            <div className="avatar-stack">
+              {uniqueOnlineUsers.slice(0, 4).map((user, idx) => (
+                <div 
+                  key={idx} 
+                  className={`stack-avatar ${user.name === userInfo.name ? "is-me" : ""}`}
+                  title={`${user.name} ${user.name === userInfo.name ? '(我)' : ''}`}
+                >
+                  {user.name.charAt(0)}
+                </div>
+              ))}
+              {uniqueOnlineUsers.length > 4 && (
+                <div className="stack-avatar avatar-more" title={`还有 ${uniqueOnlineUsers.length - 4} 名用户`}>
+                  +{uniqueOnlineUsers.length - 4}
+                </div>
+              )}
+            </div>
+            <div className="online-indicator-text">
+              <span>{uniqueOnlineUsers.length} 人正在协同</span>
+            </div>
           </div>
         </div>
 

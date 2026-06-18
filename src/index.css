@@ -295,10 +295,48 @@ body {
   overflow: hidden;
 }
 
-/* 操作按钮组 */
+/* ========== 新按钮美化（Light 风格高颜值按钮） ========== */
 .action-buttons {
   display: flex;
-  gap: 2px;
+  gap: 6px; /* 间距拉开一点 */
+  align-items: center;
+}
+
+.action-buttons .text-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px; /* 更圆润的边角 */
+  font-weight: 600;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  border: 1px solid transparent;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+/* “公开” 按钮 */
+.btn-primary-lite {
+  color: var(--color-primary) !important;
+  background-color: #e8f0fe !important;
+}
+.btn-primary-lite:hover {
+  box-shadow: 0 2px 6px rgba(26, 115, 232, 0.2);
+}
+
+/* “私有” 按钮 */
+.btn-warning-lite {
+  color: var(--color-warning) !important;
+  background-color: #fef7e0 !important;
+}
+.btn-warning-lite:hover {
+  box-shadow: 0 2px 6px rgba(242, 153, 0, 0.2);
+}
+
+/* “删” 按钮 */
+.btn-danger-lite {
+  color: var(--color-error) !important;
+  background-color: #fce8e6 !important;
+}
+.btn-danger-lite:hover {
+  box-shadow: 0 2px 6px rgba(217, 48, 37, 0.2);
 }
 
 /* 圆形按钮 */
@@ -391,30 +429,6 @@ body {
   box-shadow: none;
 }
 
-/* 顶部工具栏 */
-.main-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-  padding: 0 var(--space-lg);
-  height: 48px;
-  background: var(--color-surface);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.toggle-btn {
-  width: 40px;
-  height: 40px;
-  border-radius: var(--radius-sm);
-  border: none;
-  background: var(--color-surface);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
-
 /* 白板信息 */
 .board-info {
   display: flex;
@@ -444,14 +458,31 @@ body {
 .main-header {
   display: flex;
   align-items: center;
+  justify-content: space-between; /* 左右两端对齐 */
   gap: var(--space-md);
   padding: 0 var(--space-lg);
-  height: 48px;
+  height: 52px; /* 稍微调高，更加大气 */
   background: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
   box-shadow: var(--shadow-sm);
   z-index: 5;
 }
+
+.main-header-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  overflow: hidden;
+}
+
+.main-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-shrink: 0;
+}
+
+
 
 .toggle-btn {
   width: 40px;
@@ -514,4 +545,99 @@ body {
 .excalidraw button[aria-label="Shapes library"],
 .excalidraw button[aria-label="素材库"] {
   display: none !important;
+}
+
+
+/* 正在保存状态标签 */
+.save-status-tag {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  font-style: italic;
+  animation: pulse-opacity 1.5s infinite;
+}
+
+@keyframes pulse-opacity {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+/* 头像重叠布局 */
+.avatar-stack {
+  display: flex;
+  align-items: center;
+  flex-direction: row-reverse; /* 使靠左的头像压在靠右的上面 */
+}
+
+.stack-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-round);
+  background: #5c6bc0;
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--color-surface);
+  margin-left: -8px; /* 负边距实现重叠效果 */
+  cursor: pointer;
+  transition: transform 0.2s, z-index 0.2s;
+  user-select: none;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+.stack-avatar:hover {
+  transform: translateY(-3px);
+  z-index: 10;
+}
+
+.stack-avatar.is-me {
+  background: var(--color-primary); /* 自己的头像设为蓝色高亮 */
+}
+
+.avatar-more {
+  background: #e0e0e0;
+  color: #616161;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.online-indicator-text {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  font-weight: 500;
+  background: var(--color-bg);
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--color-border);
+}
+
+
+/* ========== 侧边栏白板内部的协同提示 ========== */
+.board-online-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--color-success);
+  font-weight: 600;
+  margin-top: 4px;
+  background: #e6f4ea;
+  padding: 1px 6px;
+  border-radius: 4px;
+  width: fit-content;
+  animation: subtle-blink 2s infinite ease-in-out;
+}
+
+@keyframes subtle-blink {
+  0%, 100% { opacity: 0.9; }
+  50% { opacity: 1; transform: scale(1.02); }
+}
+
+.visitor-badge {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  background: var(--color-surface-hover);
+  padding: 2px 6px;
+  border-radius: 4px;
 }
