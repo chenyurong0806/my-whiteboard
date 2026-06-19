@@ -347,7 +347,12 @@ export default function App() {
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
           isChannelReadyRef.current = true;
-          await channel.track({ name: userInfo.name, currentBoardId: currentBoard.id });
+          // 💡 核心修改：不仅追踪昵称和白板 ID，把头像也同步给其他协同者
+          await channel.track({
+            name: userInfo.name,
+            currentBoardId: currentBoard.id,
+            avatar: userInfo.avatar // 新增此行
+          });
         }
       });
 
@@ -673,13 +678,15 @@ export default function App() {
         presenceArray.forEach(p => {
           if (p.name && !seenNames.has(p.name)) {
             seenNames.add(p.name);
-            list.push({ name: p.name, boardId: p.currentBoardId });
+            // 💡 捞出 avatar 字段
+            list.push({ name: p.name, boardId: p.currentBoardId, avatar: p.avatar });
           }
         });
       } else if (presenceArray && presenceArray.name) {
         if (!seenNames.has(presenceArray.name)) {
           seenNames.add(presenceArray.name);
-          list.push({ name: presenceArray.name, boardId: presenceArray.currentBoardId });
+          // 💡 捞出 avatar 字段
+          list.push({ name: presenceArray.name, boardId: presenceArray.currentBoardId, avatar: presenceArray.avatar });
         }
       }
     });
@@ -821,16 +828,20 @@ export default function App() {
             </div>
           </div>
 
-          {/* 新增：右侧协同头像状态栏 */}
+          {/* 新增：右侧协同头像状态栏（已支持真实头像渲染） */}
           <div className="main-header-right">
             <div className="avatar-stack">
               {uniqueOnlineUsers.slice(0, 4).map((user, idx) => (
                 <div
                   key={idx}
-                  className={`stack-avatar ${user.name === userInfo.name ? "is-me" : ""}`}
+                  className={`stack-avatar ${user.name === userInfo.name ? "is-me" : ""} ${user.avatar ? "has-img" : ""}`}
                   title={`${user.name} ${user.name === userInfo.name ? '(我)' : ''}`}
                 >
-                  {user.name.charAt(0)}
+                  {user.avatar ? (
+                    <img src={user.avatar} alt={user.name} className="avatar-img" />
+                  ) : (
+                    user.name.charAt(0)
+                  )}
                 </div>
               ))}
               {uniqueOnlineUsers.length > 4 && (
