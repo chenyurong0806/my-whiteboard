@@ -32,7 +32,7 @@ export default function App() {
   const [currentBoard, setCurrentBoard] = useState(null);
   const [onlineUsers, setOnlineUsers] = useState(new Map());
   const [isSaving, setIsSaving] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false); 
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   const [sidebarWidth, setSidebarWidth] = useState(280);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 1024);
@@ -194,20 +194,28 @@ export default function App() {
   useEffect(() => {
     const initUser = async () => {
       const randomId = Math.random().toString(36).substring(2, 10);
-      const IS_DEV_LOGIN = false; 
+      const IS_DEV_LOGIN = false;
       if (IS_DEV_LOGIN) {
-        const mockUsername = "本地调试员"; 
+        const mockUsername = "本地调试员";
         setUserInfo({ id: randomId, name: mockUsername, isLoggedIn: true });
         await fetchBoards(mockUsername);
-        return; 
+        return;
       }
-      
+
       try {
         const res = await fetch("/api/userinfo");
         if (res.ok) {
-          const data = await res.json();
-          setUserInfo({ id: randomId, name: data.username, isLoggedIn: true });
-          await fetchBoards(data.username);
+          const result = await res.json(); // 改名为 result 避免混淆
+
+          // 确保后端成功且拿到了 data 里面的 username
+          if (result.loggedIn && result.data && result.data.username) {
+            const username = result.data.username;
+            setUserInfo({ id: randomId, name: username, isLoggedIn: true });
+            await fetchBoards(username);
+          } else {
+            // 如果 loggedIn 为 false，走访客逻辑
+            throw new Error("未登录或数据缺失");
+          }
         } else throw new Error();
       } catch {
         const guestName = `访客_${Math.floor(Math.random() * 1000)}`;
@@ -331,9 +339,9 @@ export default function App() {
     return () => {
       const trySaveUnsaved = () => {
         if (!hasUnsavedChangesRef.current || !currentBoard) return;
-        const currentElements = excalidrawAPIRef.current?.getSceneElementsIncludingDeleted 
-            ? excalidrawAPIRef.current.getSceneElementsIncludingDeleted() 
-            : latestElementsRef.current;
+        const currentElements = excalidrawAPIRef.current?.getSceneElementsIncludingDeleted
+          ? excalidrawAPIRef.current.getSceneElementsIncludingDeleted()
+          : latestElementsRef.current;
         if (currentElements) {
           executeDBSave(currentElements, true);
         } else {
@@ -371,9 +379,9 @@ export default function App() {
 
   const mergeRemoteElements = (remoteElements, updatedAt) => {
     if (!excalidrawAPIRef.current) return;
-    const localElements = excalidrawAPIRef.current.getSceneElementsIncludingDeleted 
-        ? excalidrawAPIRef.current.getSceneElementsIncludingDeleted() 
-        : latestElementsRef.current || excalidrawAPIRef.current.getSceneElements();
+    const localElements = excalidrawAPIRef.current.getSceneElementsIncludingDeleted
+      ? excalidrawAPIRef.current.getSceneElementsIncludingDeleted()
+      : latestElementsRef.current || excalidrawAPIRef.current.getSceneElements();
 
     const mergedMap = new Map();
     localElements.forEach(el => mergedMap.set(el.id, el));
@@ -790,8 +798,8 @@ export default function App() {
           <div className="main-header-right">
             <div className="avatar-stack">
               {uniqueOnlineUsers.slice(0, 4).map((user, idx) => (
-                <div 
-                  key={idx} 
+                <div
+                  key={idx}
                   className={`stack-avatar ${user.name === userInfo.name ? "is-me" : ""}`}
                   title={`${user.name} ${user.name === userInfo.name ? '(我)' : ''}`}
                 >
