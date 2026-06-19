@@ -264,6 +264,120 @@ export default function App() {
     }
   };
 
+  // 📦 工具函数 1：把本地画布里新添加的图片，上传到 Supabase Storage
+  // 📦 修复后的上传函数
+  const uploadBoardFiles = async (elements) => {
+    if (!excalidrawAPIRef.current) return;
+
+    // 💡 放宽条件：只要是 image 且有 fileId 就纳入检查
+    const imageElements = elements.filter(el => el.type === "image" && el.fileId);
+    if (imageElements.length === 0) return;
+
+    const files = excalidrawAPIRef.current.getFiles();
+    let hasUploadedAny = false;
+
+    for (const el of imageElements) {
+      const fileId = el.fileId;
+      const fileData = files[fileId];
+      if (!fileData) continue;
+
+      try {
+        // 检查云端是否已经有这个文件，避免重复上传同一个文件
+        const response = await fetch(fileData.dataURL);
+        const blob = await response.blob();
+
+        const { error } = await supabase.storage
+          .from("whiteboard-files")
+          .upload(fileId, blob, {
+            cacheControl: "3600",
+            upsert: true
+          });
+
+        if (!error) {
+          hasUploadedAny = true;
+        }
+      } catch (err) {
+        console.error("图片上传到 Storage 失败:", err);
+      }
+    }
+
+    // 💡 核心机制：如果刚刚成功上传了新图片，主动触发一次数据库更新和广播
+    // 这会强行通知另一端：“我图片上传完了，你们可以来下载了！”
+    if (hasUploadedAny && hasUnsavedChangesRef.current) {
+      const freshElements = excalidrawAPIRef.current.getSceneElements();
+      if (channelRef.current && isChannelReadyRef.current) {
+        channelRef.current.send({
+          type: 'broadcast',
+          event: 'element_update',
+          payload: { elements: freshElements, senderId: userInfo.id },
+        });
+      }
+    }
+  };
+
+  // 📦 工具函数 2：当加载白板或收到别人画的图片时，从 Supabase 下载图片并注入画布
+  // 📦 修复后的下载函数
+  const downloadBoardFiles = async (elements) => {
+    if (!excalidrawAPIRef.current || !elements) return;
+
+    // 1. 过滤出合法的图片元素，必须有 fileId
+    const imageElements = elements.filter(el => el.type === "image" && el.fileId);
+    if (imageElements.length === 0) return;
+
+    const currentFiles = excalidrawAPIRef.current.getFiles();
+    const filesToAdd = [];
+
+    for (const el of imageElements) {
+      const fileId = el.fileId;
+
+      // 💡 防御防崩溃：如果 fileId 为空或者格式不对，直接跳过，防止 getPublicUrl 报错
+      if (!fileId || typeof fileId !== 'string') continue;
+      // 如果本地已经下载过了，直接跳过
+      if (currentFiles[fileId]) continue;
+
+      // 2. 获取该图片在 Supabase 上的公开访问链接
+      const { data } = supabase.storage
+        .from("whiteboard-files")
+        .getPublicUrl(fileId);
+
+      if (data?.publicUrl) {
+        try {
+          const res = await fetch(data.publicUrl);
+          // 💡 如果云端还没上传成功（返回 400 或 404），这里及时拦截，等下一次数据更新时再试
+          if (!res.ok) {
+            console.log(`⏳ 图片 ${fileId} 在云端尚不存在，等待上传中...`);
+            continue;
+          }
+
+          const blob = await res.blob();
+          const dataURL = await new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.readAsDataURL(blob);
+          });
+
+          filesToAdd.push({
+            id: fileId,
+            dataURL: dataURL,
+            mimeType: blob.type || "image/png",
+            created: Date.now()
+          });
+        } catch (e) {
+          console.error("从 Storage 下载图片失败:", fileId, e);
+        }
+      }
+    }
+
+    // 3. 批量注入画布
+    if (filesToAdd.length > 0) {
+      excalidrawAPIRef.current.addFiles(filesToAdd);
+      // 💡 注入新图片文件后，强行让画布重绘一下，保证立即刷新显示
+      excalidrawAPIRef.current.updateScene({ elements: excalidrawAPIRef.current.getSceneElements() });
+    }
+  };
+
+
+
   useEffect(() => {
     if (!currentBoard?.id || !userInfo.id) return;
 
@@ -382,7 +496,7 @@ export default function App() {
     };
   }, [currentBoard?.id, userInfo.id]);
 
-  const loadBoardToCanvas = useCallback((board) => {
+  const loadBoardToCanvas = useCallback(async (board) => {
     if (!excalidrawAPIRef.current || !board) return;
     const parsed = parseContent(board.content);
     const elements = parsed.elements;
@@ -392,13 +506,15 @@ export default function App() {
     latestElementsRef.current = structuredClone(elements);
     isRemoteUpdatingRef.current = true;
     excalidrawAPIRef.current.updateScene({ elements });
+    await downloadBoardFiles(elements);
     setTimeout(() => {
       isRemoteUpdatingRef.current = false;
     }, 60);
   }, []);
 
-  const mergeRemoteElements = (remoteElements, updatedAt) => {
+  const mergeRemoteElements = async (remoteElements, updatedAt) => {
     if (!excalidrawAPIRef.current) return;
+    await downloadBoardFiles(remoteElements);
     const localElements = excalidrawAPIRef.current.getSceneElementsIncludingDeleted
       ? excalidrawAPIRef.current.getSceneElementsIncludingDeleted()
       : latestElementsRef.current || excalidrawAPIRef.current.getSceneElements();
@@ -517,6 +633,8 @@ export default function App() {
     }
 
     const elementsToSave = structuredClone(elements);
+    await uploadBoardFiles(elementsToSave);
+
     isSavingRef.current = true;
     setIsSaving(true);
 
@@ -567,16 +685,31 @@ export default function App() {
     latestElementsRef.current = elements;
     hasUnsavedChangesRef.current = true;
 
+    // 找到 handleOnChange 里的这段代码并修改：
     clearTimeout(broadcastTimer.current);
     broadcastTimer.current = setTimeout(() => {
       if (channelRef.current && isChannelReadyRef.current) {
+
+        // 💡 过滤机制：如果某个图片在本地内存里都还没加载好（没有二进制数据），先别广播它
+        const localFiles = excalidrawAPIRef.current?.getFiles() || {};
+        const filteredElements = elements.map(el => {
+          if (el.type === "image" && !localFiles[el.fileId]) {
+            // 本地还不存在这个图片的实体文件时，先跳过或者把这个临时节点剔除
+            return null;
+          }
+          return el;
+        }).filter(Boolean);
+
         channelRef.current.send({
           type: 'broadcast',
           event: 'element_update',
-          payload: { elements: elements, senderId: userInfo.id },
+          payload: { elements: filteredElements, senderId: userInfo.id }, // 发送净化后的节点
         });
       }
       pendingRemoteUpdateRef.current = null;
+
+      // 💡 在这里也顺便异步触发一次图片上传检查
+      uploadBoardFiles(elements);
     }, 50);
 
     clearTimeout(moveEndTimer.current);
