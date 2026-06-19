@@ -26,7 +26,7 @@ const parseContent = (content) => {
 };
 
 export default function App() {
-  const [userInfo, setUserInfo] = useState({ id: "", name: "访客", isLoggedIn: false });
+  const [userInfo, setUserInfo] = useState({ id: "", name: "访客", isLoggedIn: false, avatar: "" });
   const [publicBoards, setPublicBoards] = useState([]);
   const [privateBoards, setPrivateBoards] = useState([]);
   const [currentBoard, setCurrentBoard] = useState(null);
@@ -194,37 +194,52 @@ export default function App() {
   useEffect(() => {
     const initUser = async () => {
       const randomId = Math.random().toString(36).substring(2, 10);
-      const IS_DEV_LOGIN = false;
+      const IS_DEV_LOGIN = false; // 关闭调试模式，走正式后端
+
       if (IS_DEV_LOGIN) {
-        const mockUsername = "本地调试员";
-        setUserInfo({ id: randomId, name: mockUsername, isLoggedIn: true });
-        await fetchBoards(mockUsername);
+        const mockNickname = "本地调试员";
+        setUserInfo({ id: randomId, name: mockNickname, isLoggedIn: true, avatar: "" });
+        await fetchBoards(mockNickname);
         return;
       }
 
       try {
         const res = await fetch("/api/userinfo");
         if (res.ok) {
-          const result = await res.json(); // 改名为 result 避免混淆
+          const result = await res.json();
 
-          // 确保后端成功且拿到了 data 里面的 username
-          if (result.loggedIn && result.data && result.data.username) {
-            const username = result.data.username;
-            setUserInfo({ id: randomId, name: username, isLoggedIn: true });
-            await fetchBoards(username);
+          // 💡 核心修改：检查 result.data.nickname。同时做了兜底：如果后端还没改完，继续用 username 
+          if (result.loggedIn && result.data && (result.data.nickname || result.data.username)) {
+            const nickname = result.data.nickname || result.data.username;
+            const userAvatar = result.data.avatar || "";
+
+            setUserInfo({ id: randomId, name: nickname, isLoggedIn: true, avatar: userAvatar });
+
+            // ⚠️ 注意：如果你的白板表（whiteboards）的 owner 字段存的是昵称，则用 nickname 去查
+            await fetchBoards(nickname);
           } else {
-            // 如果 loggedIn 为 false，走访客逻辑
             throw new Error("未登录或数据缺失");
           }
         } else throw new Error();
       } catch {
         const guestName = `访客_${Math.floor(Math.random() * 1000)}`;
-        setUserInfo({ id: randomId, name: guestName, isLoggedIn: false });
+        setUserInfo({ id: randomId, name: guestName, isLoggedIn: false, avatar: "" });
         await fetchBoards(guestName);
       }
     };
     initUser();
   }, []);
+
+  // 辅助跳转函数（带有 Google 风格的短延迟，让点击波纹动画能够完全舒展展示）
+  const handleAvatarClick = (e) => {
+    e.preventDefault();
+    // 延迟 150ms 跳转，给用户留下完美的点击动效反馈时间
+    setTimeout(() => {
+      window.open("https://user.chenyurong.qzz.io/", "_blank", "noopener,noreferrer");
+    }, 150);
+  };
+
+
 
   const fetchBoards = async (currentNameOverride) => {
     const activeUsername = currentNameOverride || userInfo.name;
@@ -699,7 +714,19 @@ export default function App() {
         }}
       >
         <div className="user-card">
-          <div className="avatar">{userInfo.name.charAt(0)}</div>
+          <div
+            className={`avatar google-avatar-btn ${userInfo.avatar ? "has-img" : ""}`}
+            onClick={handleAvatarClick}
+            role="button"
+            tabIndex={0}
+            title="点击查看个人资料"
+          >
+            {userInfo.avatar ? (
+              <img src={userInfo.avatar} alt={userInfo.name} className="avatar-img" />
+            ) : (
+              userInfo.name.charAt(0)
+            )}
+          </div>
           <div>
             <div className="user-name">{userInfo.name}</div>
             <div
